@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class AgentState(str, Enum):
+    STARTING = "starting"
+    ONLINE = "online"
+    DEGRADED = "degraded"
+    RECOVERING = "recovering"
+    PROVISIONING = "provisioning"
+    STOPPED = "stopped"
+
+
+@dataclass(frozen=True, slots=True)
+class WifiNetwork:
+    ssid: str
+    signal: int = 0
+    security: str = ""
+    active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkSnapshot:
+    interface: str
+    link_up: bool = False
+    connection_name: str = ""
+    ssid: str = ""
+    ipv4: str = ""
+    gateway: str = ""
+    dns_servers: tuple[str, ...] = ()
+    target_reachable: bool = False
+    captive_portal: bool = False
+    ap_active: bool = False
+    checked_at: float = 0.0
+    error: str = ""
+
+    @property
+    def has_addressing(self) -> bool:
+        return bool(self.link_up and self.ipv4 and self.gateway and self.dns_servers)
+
+    @property
+    def uplink_ready(self) -> bool:
+        return self.has_addressing and self.target_reachable and not self.captive_portal
+
+
+@dataclass(frozen=True, slots=True)
+class OverlaySnapshot:
+    enabled: bool = True
+    running: bool = False
+    connected: bool = False
+    virtual_ip: str = ""
+    peer_count: int = 0
+    checked_at: float = 0.0
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceSnapshot:
+    name: str
+    reachable: bool
+    latency_ms: float | None = None
+    error: str = ""
+
+
+@dataclass(slots=True)
+class Counters:
+    ticks: int = 0
+    uplink_failures: int = 0
+    reconnect_attempts: int = 0
+    ap_starts: int = 0
+    ap_stops: int = 0
+    overlay_starts: int = 0
+    overlay_restarts: int = 0
+    provisioning_successes: int = 0
+    provisioning_failures: int = 0
+
+
+@dataclass(slots=True)
+class AgentStatus:
+    state: AgentState = AgentState.STARTING
+    reason: str = "initializing"
+    network: NetworkSnapshot = field(default_factory=lambda: NetworkSnapshot(interface=""))
+    overlay: OverlaySnapshot = field(default_factory=OverlaySnapshot)
+    services: tuple[ServiceSnapshot, ...] = ()
+    counters: Counters = field(default_factory=Counters)
+    state_changed_at: float = 0.0
+    last_event_at: float = 0.0
+    next_action_at: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["state"] = self.state.value
+        return payload
+

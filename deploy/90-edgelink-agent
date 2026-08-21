@@ -1,0 +1,9 @@
+#!/bin/sh
+# NetworkManager dispatcher bridge. Recovery remains in the single-writer agent.
+# Arguments are intentionally ignored: every event causes a fresh state read.
+if command -v curl >/dev/null 2>&1; then
+    curl --silent --show-error --max-time 1 --request POST \
+        http://127.0.0.1:8787/v1/events/network >/dev/null 2>&1 || true
+fi
+exit 0
+

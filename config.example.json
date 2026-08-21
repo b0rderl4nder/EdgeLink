@@ -1,0 +1,53 @@
+{
+  "device_name": "zebao-0",
+  "tick_seconds": 2,
+  "wifi": {
+    "interface": "wlan0",
+    "startup_grace_seconds": 45,
+    "reconnect_interval_seconds": 15,
+    "reconnect_attempts_before_ap": 3,
+    "ap_fallback_seconds": 60,
+    "recovery_cooldown_seconds": 120,
+    "stable_before_ap_stop_seconds": 8,
+    "auto_retry_saved_profiles": true,
+    "ap_saved_retry_seconds": 180,
+    "ap_client_hold_seconds": 120
+  },
+  "access_point": {
+    "enabled": true,
+    "connection_name": "edgelink-provisioning",
+    "ssid_prefix": "reachy-mini-ap",
+    "password_env": "EDGELINK_AP_PASSWORD",
+    "ipv4_cidr": "10.42.0.1/24",
+    "reuse_existing_profile": false
+  },
+  "health": {
+    "dns_name": "example.com",
+    "target_policy": "any",
+    "targets": [
+      {
+        "name": "public_https",
+        "host": "1.1.1.1",
+        "port": 443,
+        "required": true,
+        "timeout_seconds": 1.5
+      }
+    ]
+  },
+  "overlay": {
+    "enabled": true,
+    "kind": "easytier",
+    "service_unit": "easytier@default.service",
+    "cli_path": "/usr/sbin/easytier-cli",
+    "expected_cidr_prefix": "192.167.",
+    "disconnected_restart_seconds": 20
+  },
+  "api": {
+    "listen_host": "0.0.0.0",
+    "listen_port": 8787,
+    "trusted_mutation_subnets": [
+      "127.0.0.0/8",
+      "10.42.0.0/24"
+    ]
+  }
+}

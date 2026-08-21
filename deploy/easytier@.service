@@ -1,0 +1,19 @@
+[Unit]
+Description=EasyTier Service (%i)
+Wants=network.target
+After=network.target NetworkManager.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/easytier
+ExecStart=/opt/easytier/easytier-core -c /opt/easytier/config/%i.conf
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,48 @@
+{
+  "product": "EdgeLink Agent",
+  "version": "0.1.0",
+  "device": "zebao-0",
+  "captured_at": "2026-08-22T00:42:30+01:00",
+  "source_checks": {
+    "pytest": "17 passed",
+    "ruff": "passed",
+    "mypy": "passed",
+    "compileall": "passed",
+    "shell_syntax": "passed on target",
+    "wheel_build": "passed",
+    "offline_bundle_sha256": "recorded in dist/SHA256SUMS outside the bundle"
+  },
+  "target_preflight": {
+    "network_manager": "passed",
+    "wifi_interface": "passed",
+    "ap_capability": "passed",
+    "easytier_unit": "passed",
+    "reachy_daemon_coexistence": "reviewed"
+  },
+  "runtime": {
+    "service": "active",
+    "state": "online",
+    "wifi": "LZWC",
+    "overlay_connected": true,
+    "overlay_virtual_ip": "192.167.111.212",
+    "lan_api": "passed",
+    "overlay_api": "passed",
+    "remote_mutation_guard": "403 as expected",
+    "release_retention": 3,
+    "current_release": "recorded on target after deployment"
+  },
+  "fault_injection": {
+    "easytier_manual_stop": "recovered by agent in approximately 2 seconds",
+    "network_dispatcher": "event consumed without traceback",
+    "existing_hotspot_activation": "passed",
+    "existing_hotspot_identity_preserved": true,
+    "scheduled_wifi_safety_recovery": "returned to LZWC and online",
+    "new_wifi_wrong_password": "covered by automated transaction test; not destructively repeated on target"
+  },
+  "known_device_fact": {
+    "profile": "LZWC",
+    "ipv4_method": "manual",
+    "impact": "同SSID的其他接入点不能安全复用该旧配置；EdgeLink新建配置会强制使用DHCP"
+  },
+  "contains_secrets": false
+}
