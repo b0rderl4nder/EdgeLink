@@ -11,7 +11,13 @@ from edgelink_agent.config import (
     WifiConfig,
 )
 from edgelink_agent.controller import EdgeLinkController
-from edgelink_agent.models import AgentState, NetworkSnapshot, OverlaySnapshot, WifiNetwork
+from edgelink_agent.models import (
+    AgentState,
+    ConnectionAttempt,
+    NetworkSnapshot,
+    OverlaySnapshot,
+    WifiNetwork,
+)
 
 
 class FakeClock:
@@ -42,6 +48,9 @@ class FakeNetwork:
         self.restored_snapshot: NetworkSnapshot | None = None
         self.commit_result = True
         self.reconnect_result = False
+        self.checkpoint = ""
+        self.checkpoint_commit_result = True
+        self.checkpoint_rollback_result = True
 
     def snapshot(self) -> NetworkSnapshot:
         return self.current
@@ -53,11 +62,29 @@ class FakeNetwork:
         self.actions.append("reconnect")
         return self.reconnect_result
 
-    def connect(self, ssid: str, password: str) -> bool:
+    def begin_checkpoint(self, timeout_seconds: int) -> str:
+        if self.checkpoint:
+            self.actions.append(f"checkpoint_begin:{timeout_seconds}")
+        return self.checkpoint
+
+    def commit_checkpoint(self, checkpoint: str) -> bool:
+        self.actions.append("checkpoint_commit")
+        return self.checkpoint_commit_result
+
+    def rollback_checkpoint(self, checkpoint: str) -> bool:
+        self.actions.append("checkpoint_rollback")
+        if self.checkpoint_rollback_result and self.restored_snapshot is not None:
+            self.current = self.restored_snapshot
+        return self.checkpoint_rollback_result
+
+    def connect(self, ssid: str, password: str) -> ConnectionAttempt:
         self.actions.append(f"connect:{ssid}")
         if self.connect_result and self.connected_snapshot is not None:
             self.current = self.connected_snapshot
-        return self.connect_result
+        return ConnectionAttempt(
+            self.connect_result,
+            "" if self.connect_result else "connection_failed",
+        )
 
     def commit(self, ssid: str) -> bool:
         self.actions.append(f"commit:{ssid}")
@@ -102,11 +129,11 @@ class BlockingNetwork(FakeNetwork):
         self.connect_started = Event()
         self.release_connect = Event()
 
-    def connect(self, ssid: str, password: str) -> bool:
+    def connect(self, ssid: str, password: str) -> ConnectionAttempt:
         self.actions.append(f"connect:{ssid}")
         self.connect_started.set()
         self.release_connect.wait(timeout=2)
-        return False
+        return ConnectionAttempt(False, "connection_failed")
 
 
 class FakeOverlay:
@@ -498,6 +525,47 @@ def test_uncommitted_verified_profile_rolls_back_instead_of_surviving_reboot(
         "suspend:Candidate WiFi",
         "restore:Office",
     ]
+
+
+def test_checkpoint_transaction_commits_only_after_network_validation(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    network = FakeNetwork(healthy_network())
+    network.checkpoint = "/org/freedesktop/NetworkManager/Checkpoint/1"
+    network.connect_result = True
+    network.connected_snapshot = replace(healthy_network(), connection_name="candidate")
+    controller = EdgeLinkController(
+        config(), network, FakeOverlay(OverlaySnapshot()), FakeClock()
+    )
+
+    assert controller.provision_wifi("Candidate WiFi", "12345678") == (True, "connected")
+    assert network.actions == [
+        "checkpoint_begin:90",
+        "connect:Candidate WiFi",
+        "commit:Candidate WiFi",
+        "checkpoint_commit",
+    ]
+    assert controller.status().counters.checkpoints_committed == 1
+
+
+def test_checkpoint_failure_rolls_back_without_mutating_restored_profile(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    network = FakeNetwork(healthy_network())
+    network.checkpoint = "/org/freedesktop/NetworkManager/Checkpoint/1"
+    network.restored_snapshot = healthy_network()
+    controller = EdgeLinkController(
+        config(), network, FakeOverlay(OverlaySnapshot()), FakeClock()
+    )
+
+    ok, reason = controller.provision_wifi("Missing WiFi", "12345678")
+
+    assert not ok
+    assert reason == "connection_failed_checkpoint_rolled_back"
+    assert network.actions == [
+        "checkpoint_begin:90",
+        "connect:Missing WiFi",
+        "checkpoint_rollback",
+    ]
+    assert controller.status().counters.checkpoints_rolled_back == 1
 
 
 def test_wifi_credentials_follow_byte_limits_and_reject_secret_file_injection() -> None:

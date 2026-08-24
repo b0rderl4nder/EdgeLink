@@ -30,6 +30,30 @@ def run_preflight(config: AgentConfig, runner: CommandRunner | None = None) -> l
         )
     )
 
+    checkpoint = command.run(
+        (
+            "busctl",
+            "introspect",
+            "org.freedesktop.NetworkManager",
+            "/org/freedesktop/NetworkManager",
+            "org.freedesktop.NetworkManager",
+        ),
+        timeout=5.0,
+    )
+    checkpoint_supported = (
+        checkpoint.returncode == 0 and "CheckpointCreate" in checkpoint.stdout
+    )
+    checks.append(
+        Check(
+            "network_checkpoint",
+            checkpoint_supported,
+            "warning",
+            "NetworkManager支持原子检查点回滚"
+            if checkpoint_supported
+            else "NetworkManager不支持检查点，将使用旧连接与AP双重回退",
+        )
+    )
+
     device = command.run(
         ("nmcli", "-g", "GENERAL.STATE", "device", "show", config.wifi.interface),
         timeout=5.0,
@@ -90,7 +114,7 @@ def run_preflight(config: AgentConfig, runner: CommandRunner | None = None) -> l
                 "existing_network_controller",
                 True,
                 "warning",
-                "检测到Reachy daemon；启用自动AP前应确认其热点回退不会与EdgeLink重复执行",
+                "检测到Reachy daemon；保留为独立兜底，EdgeLink不会禁用其恢复能力",
             )
         )
 

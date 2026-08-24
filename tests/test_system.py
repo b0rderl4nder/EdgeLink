@@ -157,3 +157,184 @@ def test_restore_activates_exact_previous_connection() -> None:
         "up",
         "Office LAN",
     )
+
+
+class CheckpointRunner(RecordingRunner):
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        call = tuple(args)
+        self.calls.append(call)
+        if call[:5] == ("nmcli", "-g", "GENERAL.DBUS-PATH", "device", "show"):
+            return CommandResult(0, "/org/freedesktop/NetworkManager/Devices/3\n")
+        if "CheckpointCreate" in " ".join(call):
+            return CommandResult(
+                0,
+                "(objectpath '/org/freedesktop/NetworkManager/Checkpoint/7',)\n",
+            )
+        return CommandResult(0, "()\n")
+
+
+def test_network_manager_checkpoint_has_automatic_rollback_and_delete_new_profiles() -> None:
+    runner = CheckpointRunner()
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
+    )
+
+    checkpoint = adapter.begin_checkpoint(90)
+
+    assert checkpoint == "/org/freedesktop/NetworkManager/Checkpoint/7"
+    create = next(call for call in runner.calls if "CheckpointCreate" in " ".join(call))
+    assert "['/org/freedesktop/NetworkManager/Devices/3']" in create
+    assert create[-2:] == ("90", "2")
+    assert adapter.rollback_checkpoint(checkpoint)
+    assert adapter.commit_checkpoint(checkpoint)
+
+
+class ActivationFailureRunner(RecordingRunner):
+    def __init__(self, reason: int, stderr: str = "") -> None:
+        super().__init__()
+        self.reason = reason
+        self.stderr = stderr
+
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        call = tuple(args)
+        self.calls.append(call)
+        if call[:5] == ("nmcli", "-g", "NAME", "connection", "show"):
+            return CommandResult(10, "", "not found")
+        if "connection" in call and "up" in call:
+            return CommandResult(4, "", self.stderr)
+        if call[:5] == ("nmcli", "-g", "GENERAL.REASON", "device", "show"):
+            return CommandResult(0, f"{self.reason} (redacted)\n")
+        if call[:5] == ("nmcli", "-t", "-f", "SSID", "device"):
+            return CommandResult(0, "Slow Network\nPrivate Network\n")
+        return CommandResult(0, "", "")
+
+
+def test_activation_failures_use_networkmanager_reason_codes_without_leaking_secret() -> None:
+    cases = {
+        53: "ssid_not_found",
+        7: "authentication_failed",
+        17: "dhcp_failed",
+        64: "address_conflict",
+        75: "interface_unmanaged",
+    }
+    for code, expected in cases.items():
+        runner = ActivationFailureRunner(code)
+        adapter = NetworkManagerAdapter(
+            WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
+        )
+        result = adapter.connect("Private Network", "top-secret-password")
+        assert not result
+        assert result.reason == expected
+        assert "top-secret-password" not in " ".join(
+            part for call in runner.calls for part in call
+        )
+
+
+def test_timeout_is_classified_when_networkmanager_has_no_specific_reason() -> None:
+    adapter = NetworkManagerAdapter(
+        WifiConfig(),
+        AccessPointConfig(),
+        HealthConfig(),
+        runner=ActivationFailureRunner(0, "TimeoutExpired"),
+    )
+    result = adapter.connect("Slow Network", "12345678")
+    assert result.reason == "activation_timeout"
+
+
+def test_timed_out_ssid_absent_from_cached_scan_is_classified_as_not_found() -> None:
+    adapter = NetworkManagerAdapter(
+        WifiConfig(),
+        AccessPointConfig(),
+        HealthConfig(),
+        runner=ActivationFailureRunner(0, "TimeoutExpired"),
+    )
+    result = adapter.connect("Definitely Missing", "12345678")
+    assert result.reason == "ssid_not_found"
+
+
+class HealthRunner(RecordingRunner):
+    def __init__(self, dns_ok: bool) -> None:
+        super().__init__()
+        self.dns_ok = dns_ok
+
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        call = tuple(args)
+        self.calls.append(call)
+        device_fields = (
+            "GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS"
+        )
+        if call[:3] == ("nmcli", "-f", device_fields):
+            return CommandResult(
+                0,
+                "GENERAL.STATE: 100 (connected)\n"
+                "GENERAL.CONNECTION: Office\n"
+                "IP4.ADDRESS[1]: 192.168.1.20/24\n"
+                "IP4.GATEWAY: 192.168.1.1\n"
+                "IP4.DNS[1]: 192.168.1.1\n",
+            )
+        if call[:3] == ("nmcli", "-g", "802-11-wireless.mode"):
+            return CommandResult(0, "infrastructure\n")
+        if call[:5] == ("nmcli", "-t", "-f", "ACTIVE,SSID", "device"):
+            return CommandResult(0, "yes:Office\n")
+        if call[:3] == ("nmcli", "networking", "connectivity"):
+            return CommandResult(0, "unknown\n")
+        if call and call[0] == "getent":
+            return CommandResult(0 if self.dns_ok else 2, "1.2.3.4\n" if self.dns_ok else "")
+        return CommandResult(0, "")
+
+
+class SocketConnection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+
+def test_target_probe_is_independent_of_dns_probe(monkeypatch) -> None:
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: SocketConnection())
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=HealthRunner(False)
+    )
+
+    snapshot = adapter.snapshot()
+
+    assert not snapshot.dns_reachable
+    assert snapshot.target_reachable
+    assert snapshot.health_level == "internet"
+    assert snapshot.uplink_ready
+    assert snapshot.error == "dns_degraded"
+
+
+def test_dns_can_be_one_of_several_independent_internet_signals(monkeypatch) -> None:
+    def unreachable(*args, **kwargs):
+        raise OSError("blocked target")
+
+    monkeypatch.setattr("socket.create_connection", unreachable)
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=HealthRunner(True)
+    )
+
+    snapshot = adapter.snapshot()
+
+    assert snapshot.dns_reachable
+    assert not snapshot.target_reachable
+    assert snapshot.uplink_ready
+    assert snapshot.health_level == "internet"
+
+
+def test_strict_health_policy_can_require_non_dns_internet_evidence(monkeypatch) -> None:
+    def unreachable(*args, **kwargs):
+        raise OSError("blocked target")
+
+    monkeypatch.setattr("socket.create_connection", unreachable)
+    health = HealthConfig(accept_dns_as_internet_evidence=False)
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), health, runner=HealthRunner(True)
+    )
+
+    snapshot = adapter.snapshot()
+
+    assert not snapshot.uplink_ready
+    assert snapshot.health_level == "local"
+    assert snapshot.error == "uplink_target_unreachable"

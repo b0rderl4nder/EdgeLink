@@ -7,7 +7,7 @@ import urllib.request
 from edgelink_agent.api import ApiServer
 from edgelink_agent.config import AgentConfig, ApiConfig, OverlayConfig
 from edgelink_agent.controller import EdgeLinkController
-from edgelink_agent.models import NetworkSnapshot, OverlaySnapshot, WifiNetwork
+from edgelink_agent.models import ConnectionAttempt, NetworkSnapshot, OverlaySnapshot, WifiNetwork
 
 
 class ApiNetwork:
@@ -23,9 +23,18 @@ class ApiNetwork:
     def reconnect_saved(self) -> bool:
         return True
 
-    def connect(self, ssid: str, password: str) -> bool:
-        self.actions.append(f"connect:{ssid}")
+    def begin_checkpoint(self, timeout_seconds: int) -> str:
+        return ""
+
+    def commit_checkpoint(self, checkpoint: str) -> bool:
         return False
+
+    def rollback_checkpoint(self, checkpoint: str) -> bool:
+        return False
+
+    def connect(self, ssid: str, password: str) -> ConnectionAttempt:
+        self.actions.append(f"connect:{ssid}")
+        return ConnectionAttempt(False, "connection_failed")
 
     def commit(self, ssid: str) -> bool:
         return True
@@ -87,7 +96,7 @@ def test_http_status_scan_and_secret_free_failed_connect() -> None:
     try:
         status_code, status = _json_request(f"{base}/v1/status")
         assert status_code == 200
-        assert status["version"] == "0.2.0"
+        assert status["version"] == "0.3.0"
         assert "commit" in status["build"]
         assert status["network"]["ssid"] == "Test WiFi"
 

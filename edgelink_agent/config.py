@@ -23,6 +23,7 @@ class WifiConfig:
     auto_retry_saved_profiles: bool = True
     ap_saved_retry_seconds: float = 180.0
     ap_client_hold_seconds: float = 120.0
+    checkpoint_timeout_seconds: int = 90
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,8 @@ class HealthConfig:
     dns_name: str = "example.com"
     dns_timeout_seconds: float = 2.0
     target_policy: str = "any"
+    minimum_connectivity: str = "internet"
+    accept_dns_as_internet_evidence: bool = True
     targets: tuple[ProbeTarget, ...] = (
         ProbeTarget(name="dns_https", host="1.1.1.1", port=443),
     )
@@ -141,6 +144,15 @@ def load_config(path: str | os.PathLike[str]) -> AgentConfig:
                 health.get("dns_timeout_seconds", defaults.health.dns_timeout_seconds)
             ),
             target_policy=str(health.get("target_policy", defaults.health.target_policy)),
+            minimum_connectivity=str(
+                health.get("minimum_connectivity", defaults.health.minimum_connectivity)
+            ),
+            accept_dns_as_internet_evidence=bool(
+                health.get(
+                    "accept_dns_as_internet_evidence",
+                    defaults.health.accept_dns_as_internet_evidence,
+                )
+            ),
             targets=_targets(health.get("targets")),
         ),
         overlay=OverlayConfig(**{**_dataclass_values(defaults.overlay), **overlay}),
@@ -174,6 +186,7 @@ def _validate_config(config: AgentConfig) -> None:
         "provisioning_start_delay_seconds": config.wifi.provisioning_start_delay_seconds,
         "ap_saved_retry_seconds": config.wifi.ap_saved_retry_seconds,
         "ap_client_hold_seconds": config.wifi.ap_client_hold_seconds,
+        "checkpoint_timeout_seconds": config.wifi.checkpoint_timeout_seconds,
     }
     invalid = [name for name, value in positive_wifi_values.items() if value <= 0]
     if invalid:
@@ -186,6 +199,8 @@ def _validate_config(config: AgentConfig) -> None:
         raise ValueError("api.listen_port must be between 0 and 65535")
     if config.health.target_policy not in {"any", "all"}:
         raise ValueError("health.target_policy must be 'any' or 'all'")
+    if config.health.minimum_connectivity not in {"local", "internet"}:
+        raise ValueError("health.minimum_connectivity must be 'local' or 'internet'")
     if config.health.dns_timeout_seconds <= 0:
         raise ValueError("health.dns_timeout_seconds must be positive")
     for target in config.health.targets:

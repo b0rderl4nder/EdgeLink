@@ -17,6 +17,8 @@ class PreflightRunner:
             return CommandResult(0, "active\n")
         if command[:2] == ("systemctl", "cat"):
             return CommandResult(0, "[Unit]\n")
+        if command[:2] == ("busctl", "introspect"):
+            return CommandResult(0, ".CheckpointCreate method aouu o\n")
         if "WIFI-PROPERTIES.AP" in command:
             return CommandResult(0, "yes\n" if self.ap else "no\n")
         if "GENERAL.STATE" in command:
@@ -30,6 +32,8 @@ def test_preflight_accepts_supported_device_and_warns_about_reachy_daemon() -> N
     assert all(check.ok for check in checks if check.severity == "error")
     warning = next(check for check in checks if check.name == "existing_network_controller")
     assert warning.severity == "warning"
+    checkpoint = next(check for check in checks if check.name == "network_checkpoint")
+    assert checkpoint.ok
 
 
 def test_preflight_rejects_wifi_without_ap_support() -> None:

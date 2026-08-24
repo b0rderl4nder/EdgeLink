@@ -14,7 +14,7 @@ RELEASES_DIR=$INSTALL_ROOT/releases
 CONFIG_DIR=/etc/edgelink
 DISPATCHER=/etc/NetworkManager/dispatcher.d/90-edgelink-agent
 
-for command_name in python3 nmcli systemctl curl getent; do
+for command_name in python3 nmcli systemctl curl getent gdbus busctl; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         echo "缺少依赖：$command_name" >&2
         exit 1

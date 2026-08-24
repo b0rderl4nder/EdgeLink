@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .models import NetworkSnapshot, OverlaySnapshot, WifiNetwork
+from .models import ConnectionAttempt, NetworkSnapshot, OverlaySnapshot, WifiNetwork
 
 
 class NetworkPort(Protocol):
@@ -12,7 +12,13 @@ class NetworkPort(Protocol):
 
     def reconnect_saved(self) -> bool: ...
 
-    def connect(self, ssid: str, password: str) -> bool: ...
+    def begin_checkpoint(self, timeout_seconds: int) -> str: ...
+
+    def commit_checkpoint(self, checkpoint: str) -> bool: ...
+
+    def rollback_checkpoint(self, checkpoint: str) -> bool: ...
+
+    def connect(self, ssid: str, password: str) -> ConnectionAttempt: ...
 
     def commit(self, ssid: str) -> bool: ...
 

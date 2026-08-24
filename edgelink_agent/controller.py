@@ -77,6 +77,7 @@ class EdgeLinkController:
         self._command_lock = threading.Lock()
         self._pending_provisioning: _ProvisioningCommand | None = None
         self._active_provisioning_id = ""
+        self._active_checkpoint = ""
         self._event_lock = threading.Lock()
         self._pending_event_at = 0.0
         self._wake = threading.Event()
@@ -364,6 +365,15 @@ class EdgeLinkController:
         except Exception:
             LOGGER.exception("unexpected provisioning failure")
             self._status.counters.provisioning_failures += 1
+            if self._active_checkpoint:
+                if self._network.rollback_checkpoint(self._active_checkpoint):
+                    self._status.counters.checkpoints_rolled_back += 1
+                else:
+                    # Cancel the automatic timeout if explicit rollback itself failed;
+                    # otherwise a later rollback could undo the AP/manual recovery.
+                    self._network.commit_checkpoint(self._active_checkpoint)
+                    self._status.counters.checkpoint_fallbacks += 1
+                self._active_checkpoint = ""
             try:
                 self._network.suspend(command.ssid)
             except Exception:
@@ -393,22 +403,58 @@ class EdgeLinkController:
         before = self._network.snapshot()
         was_ap = before.ap_active
         previous_connection = before.connection_name if before.uplink_ready else ""
+        checkpoint = self._network.begin_checkpoint(
+            self.config.wifi.checkpoint_timeout_seconds
+        )
+        self._active_checkpoint = checkpoint
+        if checkpoint:
+            self._status.counters.checkpoints_created += 1
+        else:
+            self._status.counters.checkpoint_fallbacks += 1
         if was_ap:
             self._network.stop_ap()
-        connected = self._network.connect(ssid, password)
-        verified = self._network.snapshot() if connected else None
-        if connected and verified is not None and verified.uplink_ready:
+        attempt = self._network.connect(ssid, password)
+        verified = self._network.snapshot() if attempt.ok else None
+        if attempt.ok and verified is not None and verified.uplink_ready:
             if self._network.commit(ssid):
-                self._status.counters.provisioning_successes += 1
-                self._ap_restore_pending = False
-                self._bad_since = None
-                self._good_since = self._clock.monotonic()
-                self._wake.set()
-                return True, "connected"
-            failure_reason = "profile_commit_failed"
+                if not checkpoint or self._network.commit_checkpoint(checkpoint):
+                    if checkpoint:
+                        self._status.counters.checkpoints_committed += 1
+                    self._active_checkpoint = ""
+                    self._status.counters.provisioning_successes += 1
+                    self._ap_restore_pending = False
+                    self._bad_since = None
+                    self._good_since = self._clock.monotonic()
+                    self._wake.set()
+                    return True, "connected"
+                failure_reason = "checkpoint_commit_failed"
+            else:
+                failure_reason = "profile_commit_failed"
+        elif attempt.ok and verified is not None:
+            failure_reason = _network_reason(verified)
         else:
-            failure_reason = "connection_not_usable" if connected else "connection_failed"
+            failure_reason = attempt.reason or "connection_failed"
+
         self._status.counters.provisioning_failures += 1
+        if checkpoint and self._network.rollback_checkpoint(checkpoint):
+            self._active_checkpoint = ""
+            self._status.counters.checkpoints_rolled_back += 1
+            restored = self._network.snapshot()
+            if restored.uplink_ready or (was_ap and restored.ap_active):
+                if restored.uplink_ready:
+                    self._status.counters.previous_network_restores += 1
+                    self._bad_since = None
+                    self._good_since = self._clock.monotonic()
+                self._wake.set()
+                return False, f"{failure_reason}_checkpoint_rolled_back"
+        elif checkpoint:
+            self._network.commit_checkpoint(checkpoint)
+            self._active_checkpoint = ""
+            self._status.counters.checkpoint_fallbacks += 1
+
+        # Old NetworkManager versions and failed D-Bus rollbacks retain the proven
+        # explicit restore path. This also leaves an independent product daemon free
+        # to act as a final recovery controller.
         if not self._network.suspend(ssid):
             LOGGER.warning("failed Wi-Fi profile could not be suspended")
         if previous_connection and self._network.restore(previous_connection):
@@ -529,10 +575,10 @@ def _network_reason(snapshot: NetworkSnapshot) -> str:
         return "dhcp_incomplete"
     if not snapshot.gateway:
         return "default_route_missing"
-    if not snapshot.dns_servers or snapshot.error == "dns_unavailable":
-        return "dns_unavailable"
     if snapshot.captive_portal:
         return "captive_portal"
+    if snapshot.error:
+        return snapshot.error
     return "uplink_target_unreachable"
 
 

@@ -13,7 +13,8 @@
     "provisioning_start_delay_seconds": 1,
     "auto_retry_saved_profiles": true,
     "ap_saved_retry_seconds": 180,
-    "ap_client_hold_seconds": 120
+    "ap_client_hold_seconds": 120,
+    "checkpoint_timeout_seconds": 90
   },
   "access_point": {
     "enabled": true,
@@ -27,6 +28,8 @@
     "dns_name": "example.com",
     "dns_timeout_seconds": 2,
     "target_policy": "any",
+    "minimum_connectivity": "internet",
+    "accept_dns_as_internet_evidence": true,
     "targets": [
       {
         "name": "public_https",
