@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 from dataclasses import replace
+from threading import Event, Thread
 
 from edgelink_agent.config import (
     AccessPointConfig,
@@ -36,6 +38,10 @@ class FakeNetwork:
         self.connect_result = False
         self.connected_snapshot: NetworkSnapshot | None = None
         self.start_ap_results: list[bool] = []
+        self.restore_result = False
+        self.restored_snapshot: NetworkSnapshot | None = None
+        self.commit_result = True
+        self.reconnect_result = False
 
     def snapshot(self) -> NetworkSnapshot:
         return self.current
@@ -45,13 +51,17 @@ class FakeNetwork:
 
     def reconnect_saved(self) -> bool:
         self.actions.append("reconnect")
-        return False
+        return self.reconnect_result
 
     def connect(self, ssid: str, password: str) -> bool:
         self.actions.append(f"connect:{ssid}")
         if self.connect_result and self.connected_snapshot is not None:
             self.current = self.connected_snapshot
         return self.connect_result
+
+    def commit(self, ssid: str) -> bool:
+        self.actions.append(f"commit:{ssid}")
+        return self.commit_result
 
     def forget(self, connection_name: str) -> bool:
         self.actions.append(f"forget:{connection_name}")
@@ -60,6 +70,12 @@ class FakeNetwork:
     def suspend(self, ssid: str) -> bool:
         self.actions.append(f"suspend:{ssid}")
         return True
+
+    def restore(self, connection_name: str) -> bool:
+        self.actions.append(f"restore:{connection_name}")
+        if self.restore_result and self.restored_snapshot is not None:
+            self.current = self.restored_snapshot
+        return self.restore_result
 
     def start_ap(self, ssid: str, password: str) -> bool:
         self.actions.append(f"start_ap:{ssid}")
@@ -78,6 +94,19 @@ class FakeNetwork:
         self.actions.append("stop_ap")
         self.current = replace(self.current, ap_active=False, connection_name="")
         return True
+
+
+class BlockingNetwork(FakeNetwork):
+    def __init__(self, snapshot: NetworkSnapshot) -> None:
+        super().__init__(snapshot)
+        self.connect_started = Event()
+        self.release_connect = Event()
+
+    def connect(self, ssid: str, password: str) -> bool:
+        self.actions.append(f"connect:{ssid}")
+        self.connect_started.set()
+        self.release_connect.wait(timeout=2)
+        return False
 
 
 class FakeOverlay:
@@ -101,6 +130,7 @@ def healthy_network() -> NetworkSnapshot:
     return NetworkSnapshot(
         interface="wlan0",
         link_up=True,
+        connection_name="Office",
         ssid="Office",
         ipv4="192.168.1.20/24",
         gateway="192.168.1.1",
@@ -119,9 +149,11 @@ def config() -> AgentConfig:
         wifi=WifiConfig(
             startup_grace_seconds=10,
             reconnect_interval_seconds=2,
+            reconnect_settle_seconds=4,
             reconnect_attempts_before_ap=2,
             ap_fallback_seconds=10,
             recovery_cooldown_seconds=5,
+            provisioning_start_delay_seconds=1,
             ap_saved_retry_seconds=10,
             ap_client_hold_seconds=5,
         ),
@@ -161,6 +193,25 @@ def test_offline_retries_then_starts_fallback_ap(monkeypatch) -> None:
     assert any(action.startswith("start_ap:EdgeLink-zebao-0") for action in network.actions)
 
 
+def test_successful_reconnect_gets_a_settle_window_before_ap_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(offline_network())
+    network.reconnect_result = True
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+
+    controller.tick()
+    clock.advance(3)
+    status = controller.tick()
+
+    assert status.reason == "uplink_settling"
+    assert network.actions == ["reconnect"]
+    assert not any(action.startswith("start_ap:") for action in network.actions)
+
+    clock.advance(0.9)
+    assert controller.tick().reason == "uplink_settling"
+
+
 def test_product_template_uses_exact_ssid_without_repeated_device_name(monkeypatch) -> None:
     monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
     network = FakeNetwork(offline_network())
@@ -197,7 +248,6 @@ def test_foreign_legacy_ap_is_reconciled_to_product_configuration(monkeypatch) -
             connection_name="Hotspot",
             ssid="Zebao-1",
             ssid_prefix="Zebao",
-            reuse_existing_profile=True,
         ),
     )
     controller = EdgeLinkController(product, network, FakeOverlay(OverlaySnapshot()))
@@ -325,7 +375,156 @@ def test_successful_provisioning_keeps_new_network(monkeypatch) -> None:
 
     assert ok
     assert reason == "connected"
-    assert network.actions == ["stop_ap", "connect:New WiFi"]
+    assert network.actions == ["stop_ap", "connect:New WiFi", "commit:New WiFi"]
+
+
+def test_async_provisioning_acknowledges_before_network_switch(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(replace(offline_network(), ap_active=True))
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+    controller.tick()
+
+    accepted, reason, operation_id = controller.request_wifi_provisioning(
+        "New WiFi", "12345678"
+    )
+
+    assert accepted
+    assert reason == "accepted"
+    assert operation_id
+    assert network.actions == []
+    assert controller.status().provisioning.phase == "queued"
+
+    clock.advance(0.9)
+    controller.tick()
+    assert network.actions == []
+
+    clock.advance(0.1)
+    controller.tick()
+    assert network.actions[:2] == ["stop_ap", "connect:New WiFi"]
+    assert controller.status().provisioning.phase == "failed"
+
+
+def test_latest_queued_provisioning_request_replaces_stale_request(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(replace(offline_network(), ap_active=True))
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+    controller.tick()
+
+    first = controller.request_wifi_provisioning("Old WiFi", "12345678")
+    second = controller.request_wifi_provisioning("New WiFi", "abcdefgh")
+    clock.advance(1)
+    controller.tick()
+
+    assert first[0] and second[0]
+    assert second[1] == "queued_request_replaced"
+    assert "connect:Old WiFi" not in network.actions
+    assert "connect:New WiFi" in network.actions
+    assert controller.status().counters.provisioning_replacements == 1
+
+
+def test_running_provisioning_rejects_new_request_and_keeps_status_responsive(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = BlockingNetwork(replace(offline_network(), ap_active=True))
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+    controller.tick()
+    controller.request_wifi_provisioning("First WiFi", "12345678")
+    clock.advance(1)
+    worker = Thread(target=controller.tick)
+    worker.start()
+    assert network.connect_started.wait(timeout=1)
+
+    started = time.monotonic()
+    accepted, reason, operation_id = controller.request_wifi_provisioning(
+        "Second WiFi", "abcdefgh"
+    )
+    status = controller.status()
+    elapsed = time.monotonic() - started
+
+    assert not accepted
+    assert reason == "provisioning_busy"
+    assert operation_id == status.provisioning.operation_id
+    assert status.provisioning.phase == "running"
+    assert elapsed < 0.2
+
+    network.release_connect.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+
+def test_failed_remote_switch_restores_previous_healthy_network(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    network = FakeNetwork(healthy_network())
+    network.restore_result = True
+    network.restored_snapshot = healthy_network()
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), FakeClock())
+
+    ok, reason = controller.provision_wifi("Bad WiFi", "12345678")
+
+    assert not ok
+    assert reason == "connection_failed_previous_restored"
+    assert network.actions == [
+        "connect:Bad WiFi",
+        "suspend:Bad WiFi",
+        "restore:Office",
+    ]
+    assert not any(action.startswith("start_ap:") for action in network.actions)
+    assert controller.status().counters.previous_network_restores == 1
+
+
+def test_uncommitted_verified_profile_rolls_back_instead_of_surviving_reboot(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    network = FakeNetwork(healthy_network())
+    network.connect_result = True
+    network.connected_snapshot = replace(healthy_network(), connection_name="candidate")
+    network.commit_result = False
+    network.restore_result = True
+    network.restored_snapshot = healthy_network()
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), FakeClock())
+
+    ok, reason = controller.provision_wifi("Candidate WiFi", "12345678")
+
+    assert not ok
+    assert reason == "profile_commit_failed_previous_restored"
+    assert network.actions == [
+        "connect:Candidate WiFi",
+        "commit:Candidate WiFi",
+        "suspend:Candidate WiFi",
+        "restore:Office",
+    ]
+
+
+def test_wifi_credentials_follow_byte_limits_and_reject_secret_file_injection() -> None:
+    controller = EdgeLinkController(
+        config(), FakeNetwork(offline_network()), FakeOverlay(OverlaySnapshot()), FakeClock()
+    )
+
+    assert controller.provision_wifi("中" * 11, "12345678") == (False, "invalid_ssid")
+    assert controller.provision_wifi("Wifi", "1234567\nnext=value") == (
+        False,
+        "invalid_wifi_password",
+    )
+    accepted, reason, _ = controller.request_wifi_provisioning("Wifi", "a" * 64)
+    assert accepted and reason == "accepted"
+
+
+def test_status_is_a_deep_snapshot() -> None:
+    controller = EdgeLinkController(
+        config(), FakeNetwork(healthy_network()), FakeOverlay(OverlaySnapshot()), FakeClock()
+    )
+    snapshot = controller.status()
+    snapshot.counters.ticks = 999
+    snapshot.provisioning.phase = "corrupted"
+
+    current = controller.status()
+    assert current.counters.ticks == 0
+    assert current.provisioning.phase == "idle"
 
 
 def test_invalid_credentials_do_not_touch_network() -> None:

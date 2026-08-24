@@ -5,11 +5,12 @@
     "interface": "wlan0",
     "startup_grace_seconds": 45,
     "reconnect_interval_seconds": 15,
+    "reconnect_settle_seconds": 12,
     "reconnect_attempts_before_ap": 3,
     "ap_fallback_seconds": 60,
     "recovery_cooldown_seconds": 120,
     "ap_restore_retry_seconds": 3,
-    "stable_before_ap_stop_seconds": 8,
+    "provisioning_start_delay_seconds": 1,
     "auto_retry_saved_profiles": true,
     "ap_saved_retry_seconds": 180,
     "ap_client_hold_seconds": 120
@@ -20,11 +21,11 @@
     "ssid": "Zebao-0",
     "ssid_prefix": "Zebao",
     "password_env": "EDGELINK_AP_PASSWORD",
-    "ipv4_cidr": "10.42.0.1/24",
-    "reuse_existing_profile": true
+    "ipv4_cidr": "10.42.0.1/24"
   },
   "health": {
     "dns_name": "api.coze.cn",
+    "dns_timeout_seconds": 2,
     "target_policy": "any",
     "targets": [
       {

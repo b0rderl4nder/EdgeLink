@@ -5,7 +5,9 @@ import os
 import re
 import threading
 import time
-from dataclasses import replace
+import uuid
+from copy import deepcopy
+from dataclasses import dataclass
 
 from .config import AgentConfig, access_point_ssid
 from .models import AgentState, AgentStatus, NetworkSnapshot
@@ -13,6 +15,17 @@ from .ports import Clock, NetworkPort, OverlayPort
 
 LOGGER = logging.getLogger("edgelink.controller")
 _SAFE_SSID = re.compile(r"^[^\x00-\x1f\x7f]{1,32}$")
+_HEX_PSK = re.compile(r"^[0-9a-fA-F]{64}$")
+_SAFE_AP_PASSWORD = re.compile(r"^(?:[0-9a-fA-F]{64}|[A-Za-z0-9._~@%+=:-]{8,63})$")
+
+
+@dataclass(frozen=True, slots=True)
+class _ProvisioningCommand:
+    operation_id: str
+    ssid: str
+    password: str
+    requested_at: float
+    not_before: float
 
 
 class SystemClock:
@@ -46,11 +59,13 @@ class EdgeLinkController:
         self._clock = clock or SystemClock()
         now = self._clock.monotonic()
         self._status = AgentStatus(state_changed_at=self._clock.time())
+        self._published_status = deepcopy(self._status)
         self._boot_at = now
         self._bad_since: float | None = None
         self._good_since: float | None = None
         self._overlay_bad_since: float | None = None
         self._last_reconnect_at = float("-inf")
+        self._uplink_settle_until = float("-inf")
         self._last_ap_action_at = float("-inf")
         self._last_overlay_action_at = float("-inf")
         self._last_provisioning_activity = float("-inf")
@@ -58,14 +73,18 @@ class EdgeLinkController:
         self._ap_restore_pending = False
         self._reconnects_in_outage = 0
         self._lock = threading.RLock()
+        self._status_view_lock = threading.Lock()
+        self._command_lock = threading.Lock()
+        self._pending_provisioning: _ProvisioningCommand | None = None
+        self._active_provisioning_id = ""
         self._event_lock = threading.Lock()
         self._pending_event_at = 0.0
         self._wake = threading.Event()
         self._stop = threading.Event()
 
     def status(self) -> AgentStatus:
-        with self._lock:
-            return replace(self._status)
+        with self._status_view_lock:
+            return deepcopy(self._published_status)
 
     def notify_network_event(self) -> None:
         with self._event_lock:
@@ -83,10 +102,14 @@ class EdgeLinkController:
                 self.tick()
             except Exception:
                 LOGGER.exception("controller tick failed")
-                self._transition(AgentState.DEGRADED, "controller_error")
+                with self._lock:
+                    self._transition(AgentState.DEGRADED, "controller_error")
+                    self._publish_status_locked()
             self._wake.wait(self.config.tick_seconds)
             self._wake.clear()
-        self._transition(AgentState.STOPPED, "service_stopped")
+        with self._lock:
+            self._transition(AgentState.STOPPED, "service_stopped")
+            self._publish_status_locked()
 
     def stop(self) -> None:
         self._stop.set()
@@ -98,6 +121,10 @@ class EdgeLinkController:
                 if self._pending_event_at > self._status.last_event_at:
                     self._status.last_event_at = self._pending_event_at
             now = self._clock.monotonic()
+            command = self._claim_pending_provisioning(now)
+            if command is not None:
+                self._execute_provisioning_locked(command)
+                now = self._clock.monotonic()
             network = self._network.snapshot()
             overlay = self._overlay.snapshot()
             self._status.network = network
@@ -107,7 +134,8 @@ class EdgeLinkController:
                 self._handle_healthy_uplink(now, overlay.running, overlay.connected)
             else:
                 self._handle_unhealthy_uplink(now, network)
-            return replace(self._status)
+            self._publish_status_locked()
+            return deepcopy(self._status)
 
     def _handle_healthy_uplink(
         self, now: float, overlay_running: bool, overlay_ready: bool
@@ -117,6 +145,7 @@ class EdgeLinkController:
         self._ap_restore_pending = False
         self._bad_since = None
         self._reconnects_in_outage = 0
+        self._uplink_settle_until = float("-inf")
 
         if self.config.overlay.enabled:
             if not overlay_running:
@@ -196,6 +225,7 @@ class EdgeLinkController:
                 self._status.counters.reconnect_attempts += 1
                 self._network.stop_ap()
                 if self._network.reconnect_saved():
+                    self._uplink_settle_until = now + self.config.wifi.reconnect_settle_seconds
                     self._transition(AgentState.RECOVERING, "retrying_saved_wifi_from_ap")
                     return
                 if not self._start_ap_locked():
@@ -210,6 +240,11 @@ class EdgeLinkController:
             self._status.next_action_at = self._clock.time() + wait_seconds
             return
         self._ap_observed = False
+
+        if now < self._uplink_settle_until:
+            self._status.next_action_at = self._clock.time() + (self._uplink_settle_until - now)
+            self._transition(AgentState.RECOVERING, "uplink_settling")
+            return
 
         grace = max(
             self.config.wifi.startup_grace_seconds
@@ -227,7 +262,8 @@ class EdgeLinkController:
             self._reconnects_in_outage += 1
             self._status.counters.reconnect_attempts += 1
             self._transition(AgentState.RECOVERING, "retrying_saved_wifi")
-            self._network.reconnect_saved()
+            if self._network.reconnect_saved():
+                self._uplink_settle_until = now + self.config.wifi.reconnect_settle_seconds
             return
 
         if outage_seconds >= grace and self.config.access_point.enabled:
@@ -247,38 +283,168 @@ class EdgeLinkController:
         self._status.next_action_at = self._clock.time() + max(0.0, grace - outage_seconds)
         self._transition(AgentState.RECOVERING, _network_reason(network))
 
+    def request_wifi_provisioning(self, ssid: str, password: str) -> tuple[bool, str, str]:
+        validation_error = _validate_wifi_credentials(ssid, password)
+        if validation_error:
+            with self._lock:
+                self._status.counters.provisioning_rejections += 1
+                self._publish_status_locked()
+            return False, validation_error, ""
+        with self._command_lock:
+            if self._active_provisioning_id:
+                return False, "provisioning_busy", self._active_provisioning_id
+        with self._lock, self._command_lock:
+            if self._active_provisioning_id:
+                return False, "provisioning_busy", self._active_provisioning_id
+            now = self._clock.monotonic()
+            command = _ProvisioningCommand(
+                operation_id=uuid.uuid4().hex[:12],
+                ssid=ssid,
+                password=password,
+                requested_at=self._clock.time(),
+                not_before=now + self.config.wifi.provisioning_start_delay_seconds,
+            )
+            replaced = self._pending_provisioning is not None
+            reason = "queued_request_replaced" if replaced else "accepted"
+            self._pending_provisioning = command
+            if replaced:
+                self._status.counters.provisioning_replacements += 1
+            self._set_provisioning_status(command, "queued", reason)
+            self._publish_status_locked()
+        self._wake.set()
+        return True, reason, command.operation_id
+
     def provision_wifi(self, ssid: str, password: str) -> tuple[bool, str]:
-        if not _SAFE_SSID.fullmatch(ssid):
-            return False, "invalid_ssid"
-        if password and not 8 <= len(password) <= 63:
-            return False, "invalid_wifi_password"
-        with self._lock:
-            was_ap = self._status.network.ap_active
-            if was_ap:
-                self._network.stop_ap()
-            connected = self._network.connect(ssid, password)
-            verified = self._network.snapshot() if connected else None
-            if connected and verified is not None and verified.uplink_ready:
+        """Synchronous local entry point retained for CLI and deterministic tests."""
+        validation_error = _validate_wifi_credentials(ssid, password)
+        if validation_error:
+            with self._lock:
+                self._status.counters.provisioning_rejections += 1
+                self._publish_status_locked()
+            return False, validation_error
+        command = _ProvisioningCommand(
+            operation_id=uuid.uuid4().hex[:12],
+            ssid=ssid,
+            password=password,
+            requested_at=self._clock.time(),
+            not_before=self._clock.monotonic(),
+        )
+        with self._command_lock:
+            if self._active_provisioning_id or self._pending_provisioning is not None:
+                return False, "provisioning_busy"
+        claimed = False
+        try:
+            with self._lock:
+                with self._command_lock:
+                    if self._active_provisioning_id or self._pending_provisioning is not None:
+                        return False, "provisioning_busy"
+                    self._active_provisioning_id = command.operation_id
+                    claimed = True
+                return self._execute_provisioning_locked(command)
+        finally:
+            if claimed:
+                with self._command_lock:
+                    if self._active_provisioning_id == command.operation_id:
+                        self._active_provisioning_id = ""
+
+    def _claim_pending_provisioning(self, now: float) -> _ProvisioningCommand | None:
+        with self._command_lock:
+            command = self._pending_provisioning
+            if command is None or now < command.not_before:
+                return None
+            self._pending_provisioning = None
+            self._active_provisioning_id = command.operation_id
+            return command
+
+    def _execute_provisioning_locked(self, command: _ProvisioningCommand) -> tuple[bool, str]:
+        self._set_provisioning_status(command, "running", "connecting")
+        self._publish_status_locked()
+        try:
+            result = self._provision_wifi_locked(command.ssid, command.password)
+        except Exception:
+            LOGGER.exception("unexpected provisioning failure")
+            self._status.counters.provisioning_failures += 1
+            try:
+                self._network.suspend(command.ssid)
+            except Exception:
+                LOGGER.exception("failed Wi-Fi profile suspension raised unexpectedly")
+            try:
+                ap_restored = self._start_ap_locked()
+            except Exception:
+                LOGGER.exception("AP restoration raised unexpectedly")
+                self._status.counters.ap_start_failures += 1
+                ap_restored = False
+            if not ap_restored:
+                self._queue_ap_restore_locked()
+            result = False, "internal_error_ap_restoring"
+        ok, reason = result
+        self._set_provisioning_status(
+            command,
+            "succeeded" if ok else "failed",
+            reason,
+            finished=True,
+        )
+        self._publish_status_locked()
+        with self._command_lock:
+            self._active_provisioning_id = ""
+        return result
+
+    def _provision_wifi_locked(self, ssid: str, password: str) -> tuple[bool, str]:
+        before = self._network.snapshot()
+        was_ap = before.ap_active
+        previous_connection = before.connection_name if before.uplink_ready else ""
+        if was_ap:
+            self._network.stop_ap()
+        connected = self._network.connect(ssid, password)
+        verified = self._network.snapshot() if connected else None
+        if connected and verified is not None and verified.uplink_ready:
+            if self._network.commit(ssid):
                 self._status.counters.provisioning_successes += 1
                 self._ap_restore_pending = False
                 self._bad_since = None
                 self._good_since = self._clock.monotonic()
                 self._wake.set()
                 return True, "connected"
-            self._status.counters.provisioning_failures += 1
-            if not self._network.suspend(ssid):
-                LOGGER.warning("failed Wi-Fi profile could not be suspended")
-            if was_ap or self.config.access_point.enabled:
-                if not self._start_ap_locked():
-                    self._queue_ap_restore_locked()
-                    reason = (
-                        "connection_not_usable_ap_restoring"
-                        if connected
-                        else "connection_failed_ap_restoring"
-                    )
-                    return False, reason
-                self._transition(AgentState.PROVISIONING, "fallback_ap_restored")
-            return False, "connection_not_usable" if connected else "connection_failed"
+            failure_reason = "profile_commit_failed"
+        else:
+            failure_reason = "connection_not_usable" if connected else "connection_failed"
+        self._status.counters.provisioning_failures += 1
+        if not self._network.suspend(ssid):
+            LOGGER.warning("failed Wi-Fi profile could not be suspended")
+        if previous_connection and self._network.restore(previous_connection):
+            restored = self._network.snapshot()
+            if restored.uplink_ready:
+                self._status.counters.previous_network_restores += 1
+                self._bad_since = None
+                self._good_since = self._clock.monotonic()
+                self._wake.set()
+                return False, f"{failure_reason}_previous_restored"
+        if was_ap or self.config.access_point.enabled:
+            if not self._start_ap_locked():
+                self._queue_ap_restore_locked()
+                return False, f"{failure_reason}_ap_restoring"
+            self._transition(AgentState.PROVISIONING, "fallback_ap_restored")
+        return False, failure_reason
+
+    def _set_provisioning_status(
+        self,
+        command: _ProvisioningCommand,
+        phase: str,
+        reason: str,
+        *,
+        finished: bool = False,
+    ) -> None:
+        status = self._status.provisioning
+        status.operation_id = command.operation_id
+        status.ssid = command.ssid
+        status.phase = phase
+        status.reason = reason
+        status.requested_at = command.requested_at
+        if phase == "running":
+            status.started_at = self._clock.time()
+            status.finished_at = 0.0
+        if finished:
+            status.finished_at = self._clock.time()
 
     def start_ap(self) -> bool:
         with self._lock:
@@ -287,13 +453,14 @@ class EdgeLinkController:
                 self._ap_restore_pending = False
             else:
                 self._queue_ap_restore_locked()
+            self._publish_status_locked()
             return result
 
     def _start_ap_locked(self) -> bool:
         self._last_ap_action_at = self._clock.monotonic()
         password = os.getenv(self.config.access_point.password_env, "")
-        if len(password) < 8:
-            LOGGER.error("AP password is not configured")
+        if not _SAFE_AP_PASSWORD.fullmatch(password):
+            LOGGER.error("AP password is missing or invalid")
             self._status.counters.ap_start_failures += 1
             return False
         ssid = access_point_ssid(self.config)
@@ -322,6 +489,7 @@ class EdgeLinkController:
             if result:
                 self._status.counters.ap_stops += 1
             self._wake.set()
+            self._publish_status_locked()
             return result
 
     def recover_now(self) -> bool:
@@ -329,7 +497,12 @@ class EdgeLinkController:
             self._last_reconnect_at = self._clock.monotonic()
             self._status.counters.reconnect_attempts += 1
             result = self._network.reconnect_saved()
+            if result:
+                self._uplink_settle_until = (
+                    self._clock.monotonic() + self.config.wifi.reconnect_settle_seconds
+                )
             self._wake.set()
+            self._publish_status_locked()
             return result
 
     def _transition(self, state: AgentState, reason: str) -> None:
@@ -340,6 +513,11 @@ class EdgeLinkController:
             self._status.state_changed_at = self._clock.time()
         if state in {AgentState.ONLINE, AgentState.PROVISIONING}:
             self._status.next_action_at = None
+
+    def _publish_status_locked(self) -> None:
+        snapshot = deepcopy(self._status)
+        with self._status_view_lock:
+            self._published_status = snapshot
 
 
 def _network_reason(snapshot: NetworkSnapshot) -> str:
@@ -356,3 +534,16 @@ def _network_reason(snapshot: NetworkSnapshot) -> str:
     if snapshot.captive_portal:
         return "captive_portal"
     return "uplink_target_unreachable"
+
+
+def _validate_wifi_credentials(ssid: str, password: str) -> str:
+    if not _SAFE_SSID.fullmatch(ssid) or len(ssid.encode("utf-8")) > 32:
+        return "invalid_ssid"
+    if any(character in password for character in ("\x00", "\r", "\n")):
+        return "invalid_wifi_password"
+    if not password:
+        return ""
+    if _HEX_PSK.fullmatch(password):
+        return ""
+    password_bytes = password.encode("utf-8")
+    return "" if 8 <= len(password_bytes) <= 63 else "invalid_wifi_password"

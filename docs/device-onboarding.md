@@ -39,7 +39,7 @@ sudo ./scripts/enroll_easytier.sh <归档> <配置> default
 - `overlay.expected_cidr_prefix`：本项目虚拟网段。
 - `api.trusted_mutation_subnets`：只放本机与配网网段。
 
-AP密码位于`/etc/edgelink/secrets.env`，不要放入配置仓库。
+AP密码位于`/etc/edgelink/secrets.env`，不要放入配置仓库。首次安装必须由设备交付清单显式提供，并把热点名和密码交付给管理员；禁止生成只留在设备内、管理员无法获知的随机密码。
 
 ### 3. 验收矩阵
 
@@ -64,8 +64,8 @@ AP密码位于`/etc/edgelink/secrets.env`，不要放入配置仓库。
 3. 查明Reachy daemon运行期是否自动触发`setup_hotspot`，以及触发窗口。
 4. 第一阶段只运行preflight和单次状态检查，不启用EdgeLink自动服务。
 5. 选择唯一AP控制者：推荐EdgeLink负责自动回退，Reachy daemon保留显式扫描/连接接口。
-   0号机把`access_point.connection_name`设为`Hotspot`，并将
-   `access_point.reuse_existing_profile`设为`true`，即可复用原SSID和密码。
+   0号机把`access_point.connection_name`设为`Hotspot`，EdgeLink会接管该连接名，
+   并按产品模板统一SSID、共享地址和已交付的热点密码。
 6. 备份NetworkManager连接配置、EasyTier配置和当前服务文件。
 7. 灰度启用EdgeLink，先验证EasyTier单独恢复，再做错误Wi‑Fi回滚测试。
 8. 最后进行真实外带：公司Wi‑Fi、手机热点、完全无网三个环境。

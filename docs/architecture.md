@@ -41,21 +41,24 @@ Controller是唯一自动写入者。dispatcher可能产生延迟或乱序事件
 
 ## 事务式换网
 
-1. 校验SSID和密码长度，不记录密码。
-2. 暂停AP，创建独立的`edgelink-<SSID哈希>`连接配置。
-3. 强制恢复`ipv4.method=auto`并清理旧地址、网关和DNS，避免同SSID热点复用公司网络参数。
-4. 通过权限为`0600`的临时NetworkManager密码文件激活连接。
-5. 验证地址、路由、DNS和目标。
-6. 成功后恢复EasyTier；失败则重新启动AP。
+1. HTTP只校验并受理作业，在切换网络前先向手机返回作业编号。
+2. Controller单飞执行配网：未开始的任务只保留最新意图，执行中的任务不排队。
+3. 按Wi‑Fi字节边界校验SSID与PSK，不记录密码。
+4. 记录当前可用连接，暂停AP，创建独立的`edgelink-<SSID哈希>`连接配置。
+5. 新配置保持`autoconnect=no`，强制恢复`ipv4.method=auto`并清理旧地址、网关和DNS，通过权限为`0600`的临时NetworkManager密码文件显式激活。
+6. 验证地址、路由、DNS和目标；全部通过后才提交`autoconnect=yes`。
+7. 成功后恢复EasyTier；失败或进程中断时停用错误配置的自动连接并优先恢复原网络，原网络也不可用时才恢复AP。
 
-已有产品热点可以通过`reuse_existing_profile`直接复用其NetworkManager连接，避免迁移时改变用户熟悉的SSID和密码。
+NetworkManager的checkpoint机制是远程改网后自动回滚的官方基线；EdgeLink在不绑定特定D‑Bus客户端库的前提下，保留原连接名并显式验证回滚结果。配网页面遵循成熟门户的“广播—配网—失败后重新广播”流程。
+
+已有产品热点可通过相同的`connection_name`由EdgeLink接管；每次启动前都会按产品模板规范化SSID、AP模式、共享地址和交付密码，避免旧控制器留下不一致参数。
 
 ## 防抖与安全
 
 - 断网不会立即发出AP，先按间隔重试已保存网络。
 - AP动作和EasyTier重启分别有冷却时间。
 - 密码不进入URL、命令行、状态、日志或诊断包。
-- API写操作仅允许配置的可信网段；默认是回环地址和AP网段。
+- 配网类API只允许配置的可信网段；删除配置、停止AP和dispatcher事件仅允许本机回环地址。
 - systemd限制文件系统写入、Home目录访问和Linux capabilities。
 - 新版本先在独立release目录执行preflight，再原子切换`current`链接；启动失败恢复上一版。
 

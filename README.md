@@ -29,8 +29,8 @@ sudo ./scripts/enroll_easytier.sh \
 脚本不会联网下载浮动版本，不会生成、读取或打印你的网络密钥；配置按`0600`安装。
 
 ```bash
-tar -xzf edgelink-agent-0.1.1.tar.gz
-cd edgelink-agent-0.1.1
+tar -xzf edgelink-agent-<版本>.tar.gz
+cd edgelink-agent-<版本>
 sudo ./scripts/install.sh
 sudo edgelinkctl preflight
 edgelinkctl status
@@ -39,10 +39,10 @@ edgelinkctl status
 指定设备模板首次安装：
 
 ```bash
-sudo EDGELINK_CONFIG_SOURCE=deploy/examples/zebao0.json ./scripts/install.sh
+sudo env EDGELINK_CONFIG_SOURCE=deploy/examples/zebao0.json ./scripts/install.sh
 ```
 
-首次安装会生成`/etc/edgelink/secrets.env`，权限为`0600`。正式启用前应修改`/etc/edgelink/config.json`中的设备名、无线接口、EasyTier unit和健康探测目标。
+首次安装会在终端安全提示管理员输入AP密码，程序不再生成管理员无法获知的随机值。自动化交付应通过权限受限的`EDGELINK_AP_PASSWORD_FILE`提供。密码仅保存在`/etc/edgelink/secrets.env`，权限为`0600`，不进入配置仓库、命令行和安装日志；已安装设备升级时继续使用原密码。正式启用前应核对设备名、无线接口、EasyTier unit和健康探测目标。
 
 ## 手机配网
 
@@ -52,7 +52,7 @@ sudo EDGELINK_CONFIG_SOURCE=deploy/examples/zebao0.json ./scripts/install.sh
 Zebao-0
 ```
 
-泽宝设备使用`Zebao-<编号>`，其他产品可在设备模板中配置自己的完整SSID；不暴露底层开发板品牌。连接热点后访问`http://10.42.0.1:8787/`。新网络验证失败时页面可能短暂断开，Agent会重新发出AP。
+泽宝设备使用`Zebao-<编号>`，其他产品可在设备模板中配置自己的完整SSID；不暴露底层开发板品牌。连接热点后访问`http://10.42.0.1:8787/`。提交后页面先收到配网作业编号，Agent再切换无线网络。新网络失败时优先恢复原网络，否则每3秒重试AP，直到配网入口恢复。
 
 ## 本地命令
 
@@ -67,6 +67,8 @@ edgelinkctl preflight
 ```
 
 修改类API默认只允许本机回环地址和配网AP网段访问。ZebaoApp应通过`127.0.0.1:8787`调用，不直接控制NetworkManager或EasyTier。
+
+旧设备不知道原热点密码时，在设备本地终端执行`sudo edgelink-set-ap-password`安全设置新密码。输入不回显，密码不进入命令行、API或日志。
 
 ## 构建离线包
 

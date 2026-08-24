@@ -11,6 +11,9 @@ from edgelink_agent.models import NetworkSnapshot, OverlaySnapshot, WifiNetwork
 
 
 class ApiNetwork:
+    def __init__(self) -> None:
+        self.actions: list[str] = []
+
     def snapshot(self) -> NetworkSnapshot:
         return NetworkSnapshot(interface="wlan0", ssid="Test WiFi")
 
@@ -21,13 +24,20 @@ class ApiNetwork:
         return True
 
     def connect(self, ssid: str, password: str) -> bool:
+        self.actions.append(f"connect:{ssid}")
         return False
+
+    def commit(self, ssid: str) -> bool:
+        return True
 
     def forget(self, connection_name: str) -> bool:
         return True
 
     def suspend(self, ssid: str) -> bool:
         return True
+
+    def restore(self, connection_name: str) -> bool:
+        return False
 
     def start_ap(self, ssid: str, password: str) -> bool:
         return True
@@ -77,7 +87,7 @@ def test_http_status_scan_and_secret_free_failed_connect() -> None:
     try:
         status_code, status = _json_request(f"{base}/v1/status")
         assert status_code == 200
-        assert status["version"] == "0.1.4"
+        assert status["version"] == "0.2.0"
         assert "commit" in status["build"]
         assert status["network"]["ssid"] == "Test WiFi"
 
@@ -89,18 +99,33 @@ def test_http_status_scan_and_secret_free_failed_connect() -> None:
         assert status_code == 200
         assert public_config["ap_ssid"] == "EdgeLink-test-device"
 
-        status_code, failure = _json_request(
+        status_code, accepted = _json_request(
             f"{base}/v1/wifi/connect",
             "POST",
             {"ssid": "Another WiFi", "password": "never-return-this"},
         )
-        assert status_code == 502
-        assert failure == {
+        assert status_code == 202
+        assert accepted["ok"] is True
+        assert accepted["accepted"] is True
+        assert accepted["operation_id"]
+        assert accepted["ssid"] == "Another WiFi"
+        assert accepted["reason"] == "accepted"
+        assert network.actions == []
+        assert "never-return-this" not in json.dumps(accepted)
+
+        status_code, invalid = _json_request(
+            f"{base}/v1/wifi/connect",
+            "POST",
+            {"ssid": "中" * 11, "password": "12345678"},
+        )
+        assert status_code == 422
+        assert invalid == {
             "ok": False,
-            "ssid": "Another WiFi",
-            "reason": "connection_failed_ap_restoring",
+            "accepted": False,
+            "operation_id": "",
+            "ssid": "中" * 11,
+            "reason": "invalid_ssid",
         }
-        assert "never-return-this" not in json.dumps(failure)
 
         status_code, activity = _json_request(
             f"{base}/v1/provisioning/activity", "POST"

@@ -3,12 +3,31 @@ from __future__ import annotations
 from edgelink_agent.config import AccessPointConfig, HealthConfig, WifiConfig
 from edgelink_agent.system import (
     CommandResult,
+    ConnectivityProbe,
     NetworkManagerAdapter,
     _clean_values,
     _count_connected_peers,
     _nm_split,
     _profile_name,
 )
+
+
+class ProbeRunner:
+    def __init__(self, result: CommandResult) -> None:
+        self.result = result
+        self.calls: list[tuple[tuple[str, ...], float]] = []
+
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        self.calls.append((tuple(args), timeout))
+        return self.result
+
+
+def test_dns_probe_is_bounded_by_configured_timeout() -> None:
+    runner = ProbeRunner(CommandResult(124, "", "TimeoutExpired"))
+    probe = ConnectivityProbe(HealthConfig(dns_timeout_seconds=1.25), runner)
+
+    assert not probe.dns_available()
+    assert runner.calls == [(('getent', 'ahostsv4', 'example.com'), 1.25)]
 
 
 class RecordingRunner:
@@ -56,7 +75,7 @@ def test_existing_product_hotspot_is_reconciled_without_exposing_secret() -> Non
     runner = HotspotRunner()
     adapter = NetworkManagerAdapter(
         WifiConfig(),
-        AccessPointConfig(connection_name="Hotspot", reuse_existing_profile=True),
+        AccessPointConfig(connection_name="Hotspot"),
         HealthConfig(),
         runner=runner,
     )
@@ -90,6 +109,8 @@ def test_connect_resets_stale_static_network_settings_and_hides_password() -> No
     assert modify[modify.index("ipv4.addresses") + 1] == ""
     assert modify[modify.index("ipv4.gateway") + 1] == ""
     assert modify[modify.index("ipv4.dns") + 1] == ""
+    assert modify[modify.index("connection.autoconnect") + 1] == "no"
+    assert modify[modify.index("connection.autoconnect-retries") + 1] == "1"
     assert "passwd-file" in flattened
 
 
@@ -104,3 +125,35 @@ def test_suspending_failed_profile_prevents_it_from_stealing_ap() -> None:
     modify = runner.calls[-1]
     assert modify[:4] == ("nmcli", "connection", "modify", _profile_name("Unavailable WiFi"))
     assert modify[-2:] == ("connection.autoconnect", "no")
+
+
+def test_committing_verified_profile_enables_bounded_autoconnect() -> None:
+    runner = RecordingRunner()
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
+    )
+
+    assert adapter.commit("Verified WiFi")
+
+    modify = runner.calls[-1]
+    assert modify[modify.index("connection.autoconnect") + 1] == "yes"
+    assert modify[modify.index("connection.autoconnect-priority") + 1] == "20"
+    assert modify[modify.index("connection.autoconnect-retries") + 1] == "1"
+
+
+def test_restore_activates_exact_previous_connection() -> None:
+    runner = RecordingRunner()
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
+    )
+
+    assert adapter.restore("Office LAN")
+
+    assert runner.calls[-1] == (
+        "nmcli",
+        "--wait",
+        "20",
+        "connection",
+        "up",
+        "Office LAN",
+    )

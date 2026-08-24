@@ -42,30 +42,34 @@ class CommandRunner:
 
 
 class ConnectivityProbe:
-    def __init__(self, config: HealthConfig) -> None:
+    def __init__(self, config: HealthConfig, runner: CommandRunner) -> None:
         self._config = config
+        self._runner = runner
 
     def dns_available(self) -> bool:
-        try:
-            socket.getaddrinfo(self._config.dns_name, 443, type=socket.SOCK_STREAM)
-            return True
-        except OSError:
-            return False
+        result = self._runner.run(
+            ("getent", "ahostsv4", self._config.dns_name),
+            timeout=self._config.dns_timeout_seconds,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
 
     def targets_available(self) -> bool:
         required = [target for target in self._config.targets if target.required]
         if not required:
             return True
-        results: list[bool] = []
         for target in required:
             try:
                 with socket.create_connection(
                     (target.host, target.port), timeout=target.timeout_seconds
                 ):
-                    results.append(True)
+                    available = True
             except OSError:
-                results.append(False)
-        return all(results) if self._config.target_policy == "all" else any(results)
+                available = False
+            if self._config.target_policy == "any" and available:
+                return True
+            if self._config.target_policy == "all" and not available:
+                return False
+        return self._config.target_policy == "all"
 
 
 class NetworkManagerAdapter:
@@ -83,7 +87,7 @@ class NetworkManagerAdapter:
         self._wifi = wifi
         self._ap = access_point
         self._runner = runner or CommandRunner()
-        self._probe = ConnectivityProbe(health)
+        self._probe = ConnectivityProbe(health, self._runner)
 
     def _run(self, *args: str, timeout: float = 10.0) -> CommandResult:
         return self._runner.run(args, timeout=timeout)
@@ -227,8 +231,9 @@ class NetworkManagerAdapter:
                 return False
         base = self._run(
             "nmcli", "connection", "modify", profile,
-            "connection.autoconnect", "yes",
+            "connection.autoconnect", "no",
             "connection.autoconnect-priority", "20",
+            "connection.autoconnect-retries", "1",
             "ipv4.method", "auto", "ipv4.addresses", "", "ipv4.gateway", "", "ipv4.dns", "",
             "ipv4.ignore-auto-dns", "no", "ipv6.method", "auto",
         )
@@ -256,6 +261,22 @@ class NetworkManagerAdapter:
             )
         return activated.returncode == 0
 
+    def commit(self, ssid: str) -> bool:
+        profile = _profile_name(ssid)
+        result = self._run(
+            "nmcli",
+            "connection",
+            "modify",
+            profile,
+            "connection.autoconnect",
+            "yes",
+            "connection.autoconnect-priority",
+            "20",
+            "connection.autoconnect-retries",
+            "1",
+        )
+        return result.returncode == 0
+
     def forget(self, connection_name: str) -> bool:
         if not connection_name or connection_name == self._ap.connection_name:
             return False
@@ -271,6 +292,20 @@ class NetworkManagerAdapter:
             profile,
             "connection.autoconnect",
             "no",
+        )
+        return result.returncode == 0
+
+    def restore(self, connection_name: str) -> bool:
+        if not connection_name or connection_name == self._ap.connection_name:
+            return False
+        result = self._run(
+            "nmcli",
+            "--wait",
+            "20",
+            "connection",
+            "up",
+            connection_name,
+            timeout=25.0,
         )
         return result.returncode == 0
 
@@ -294,6 +329,7 @@ class NetworkManagerAdapter:
             "ipv4.addresses", self._ap.ipv4_cidr,
             "ipv6.method", "disabled",
             "connection.autoconnect", "no",
+            "connection.autoconnect-retries", "0",
         )
         if modified.returncode:
             return False

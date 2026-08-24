@@ -20,6 +20,12 @@ LOGGER = logging.getLogger("edgelink.api")
 MAX_BODY_BYTES = 8192
 
 
+class _LocalThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 16
+    allow_reuse_address = True
+
+
 class ApiServer:
     def __init__(
         self,
@@ -29,7 +35,7 @@ class ApiServer:
     ) -> None:
         self._config = config
         handler = _handler_factory(config, controller, network)
-        self._server = ThreadingHTTPServer(
+        self._server = _LocalThreadingHTTPServer(
             (config.api.listen_host, config.api.listen_port), handler
         )
         self._thread: threading.Thread | None = None
@@ -66,7 +72,24 @@ def _handler_factory(
         server_version = "EdgeLink/0.1"
 
         def log_message(self, format_string: str, *args: object) -> None:
-            LOGGER.info("client=%s %s", self.client_address[0], format_string % args)
+            path = urlsplit(self.path).path
+            if path.startswith("/v1/wifi/profiles/"):
+                path = "/v1/wifi/profiles/<redacted>"
+            quiet = path in {
+                "/healthz",
+                "/v1/status",
+                "/v1/provisioning/activity",
+                "/v1/events/network",
+            }
+            log = LOGGER.debug if quiet else LOGGER.info
+            status = str(args[1]) if len(args) > 1 else ""
+            log(
+                "client=%s method=%s path=%s status=%s",
+                self.client_address[0],
+                self.command,
+                path,
+                status,
+            )
 
         def do_GET(self) -> None:
             path = urlsplit(self.path).path
@@ -108,6 +131,9 @@ def _handler_factory(
                 self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "local_access_only"})
                 return
             if path == "/v1/events/network":
+                if not self._loopback_client():
+                    self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "loopback_only"})
+                    return
                 controller.notify_network_event()
                 self._json(HTTPStatus.ACCEPTED, {"ok": True})
                 return
@@ -120,19 +146,45 @@ def _handler_factory(
                 payload = self._read_json()
                 if payload is None:
                     return
-                ssid = str(payload.get("ssid", "")).strip()
-                password = str(payload.get("password", ""))
-                ok, reason = controller.provision_wifi(ssid, password)
+                raw_ssid = payload.get("ssid", "")
+                raw_password = payload.get("password", "")
+                if not isinstance(raw_ssid, str) or not isinstance(raw_password, str):
+                    self._json(
+                        HTTPStatus.UNPROCESSABLE_ENTITY,
+                        {"ok": False, "error": "invalid_wifi_credentials"},
+                    )
+                    return
+                ssid = raw_ssid
+                password = raw_password
+                ok, reason, operation_id = controller.request_wifi_provisioning(ssid, password)
+                if ok:
+                    response_status = HTTPStatus.ACCEPTED
+                elif reason == "provisioning_busy":
+                    response_status = HTTPStatus.CONFLICT
+                else:
+                    response_status = HTTPStatus.UNPROCESSABLE_ENTITY
                 self._json(
-                    HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY,
-                    {"ok": ok, "ssid": ssid, "reason": reason},
+                    response_status,
+                    {
+                        "ok": ok,
+                        "accepted": ok,
+                        "operation_id": operation_id,
+                        "ssid": ssid,
+                        "reason": reason,
+                    },
                 )
                 return
             actions = {
                 "/v1/ap/start": controller.start_ap,
-                "/v1/ap/stop": controller.stop_ap,
                 "/v1/network/recover": controller.recover_now,
             }
+            if path == "/v1/ap/stop":
+                if not self._loopback_client():
+                    self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "loopback_only"})
+                    return
+                ok = controller.stop_ap()
+                self._json(HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY, {"ok": ok})
+                return
             action = actions.get(path)
             if action is not None:
                 ok = action()
@@ -145,8 +197,8 @@ def _handler_factory(
 
         def do_DELETE(self) -> None:
             path = urlsplit(self.path).path
-            if not self._mutation_allowed(trusted):
-                self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "local_access_only"})
+            if not self._loopback_client():
+                self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "loopback_only"})
                 return
             prefix = "/v1/wifi/profiles/"
             if path.startswith(prefix):
@@ -177,6 +229,12 @@ def _handler_factory(
                 return False
             return not address.is_loopback and any(address in network for network in networks)
 
+        def _loopback_client(self) -> bool:
+            try:
+                return ipaddress.ip_address(self.client_address[0]).is_loopback
+            except ValueError:
+                return False
+
         def _read_json(self) -> dict[str, Any] | None:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -201,6 +259,7 @@ def _handler_factory(
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             try:
@@ -215,6 +274,8 @@ def _handler_factory(
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline'")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
             try:

@@ -79,6 +79,20 @@ class Counters:
     overlay_restarts: int = 0
     provisioning_successes: int = 0
     provisioning_failures: int = 0
+    provisioning_rejections: int = 0
+    provisioning_replacements: int = 0
+    previous_network_restores: int = 0
+
+
+@dataclass(slots=True)
+class ProvisioningSnapshot:
+    operation_id: str = ""
+    ssid: str = ""
+    phase: str = "idle"
+    reason: str = ""
+    requested_at: float = 0.0
+    started_at: float = 0.0
+    finished_at: float = 0.0
 
 
 @dataclass(slots=True)
@@ -89,6 +103,7 @@ class AgentStatus:
     overlay: OverlaySnapshot = field(default_factory=OverlaySnapshot)
     services: tuple[ServiceSnapshot, ...] = ()
     counters: Counters = field(default_factory=Counters)
+    provisioning: ProvisioningSnapshot = field(default_factory=ProvisioningSnapshot)
     state_changed_at: float = 0.0
     last_event_at: float = 0.0
     next_action_at: float | None = None

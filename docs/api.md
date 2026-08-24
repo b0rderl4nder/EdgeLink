@@ -7,7 +7,7 @@
 | GET | `/healthz` | 服务与当前状态 |
 | GET | `/v1/status` | 版本、来源提交、分层网络和overlay状态 |
 | GET | `/v1/wifi/scan` | 附近Wi‑Fi列表 |
-| POST | `/v1/wifi/connect` | 事务式连接并验证 |
+| POST | `/v1/wifi/connect` | 受理异步配网作业，返回`202`和作业编号 |
 | DELETE | `/v1/wifi/profiles/{name}` | 删除指定连接配置 |
 | POST | `/v1/ap/start` | 显式启动AP |
 | POST | `/v1/ap/stop` | 显式停止AP |
@@ -24,4 +24,4 @@
 }
 ```
 
-状态响应只包含SSID、地址、健康分层、EasyTier虚拟地址、状态原因和计数，不包含任何密码或网络密钥。
+受理响应包含`operation_id`；`GET /v1/status`中的`provisioning`字段显示最近作业的`queued/running/succeeded/failed`状态。状态响应只包含SSID、地址、健康分层、EasyTier虚拟地址、状态原因和计数，不包含任何密码或网络密钥。

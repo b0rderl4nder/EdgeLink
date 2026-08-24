@@ -8,6 +8,7 @@ systemctl disable --now edgelink-agent.service 2>/dev/null || true
 rm -f /etc/systemd/system/edgelink-agent.service
 rm -f /etc/NetworkManager/dispatcher.d/90-edgelink-agent
 rm -f /usr/local/bin/edgelinkctl
+rm -f /usr/local/sbin/edgelink-set-ap-password
 rm -rf /opt/edgelink-agent
 systemctl daemon-reload
 echo "程序已卸载；/etc/edgelink 中的配置和密钥已保留。"

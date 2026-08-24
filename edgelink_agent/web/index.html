@@ -50,19 +50,34 @@
     <div id="networks" class="networks"></div>
     <form id="connect">
       <label>网络名称<input id="ssid" maxlength="32" required autocomplete="off"></label>
-      <label>Wi‑Fi密码<input id="password" type="password" maxlength="63"
+      <label>Wi‑Fi密码<input id="password" type="password" maxlength="64"
         autocomplete="current-password"></label>
-      <button type="submit">连接并验证</button>
+      <button id="connectButton" type="submit">连接并验证</button>
     </form>
     <p id="message" aria-live="polite"></p>
   </section>
   <section class="panel">
     <strong>配网热点</strong><p class="muted">断网超过安全窗口后自动开启，也可以手动恢复。</p>
-    <div class="row"><button class="secondary" id="apStart">开启热点</button>
-      <button class="secondary" id="apStop">关闭热点</button></div>
+    <div class="row"><button class="secondary" id="apStart">重新开启热点</button></div>
   </section>
 </main><script>
   const $ = id => document.getElementById(id);
+  const reasonText = {
+    accepted:'已受理', queued_request_replaced:'已更新为最新配网请求', connecting:'正在连接',
+    connected:'连接成功', provisioning_busy:'另一项配网正在进行',
+    invalid_ssid:'网络名称不符合Wi‑Fi规范', invalid_wifi_password:'密码格式不符合Wi‑Fi规范',
+    connection_failed:'无法连接目标网络', connection_not_usable:'目标网络无法正常访问',
+    connection_failed_ap_restoring:'连接失败，正在恢复配网热点',
+    connection_not_usable_ap_restoring:'网络不可用，正在恢复配网热点',
+    connection_failed_previous_restored:'连接失败，已恢复原网络',
+    connection_not_usable_previous_restored:'目标网络不可用，已恢复原网络',
+    profile_commit_failed:'网络验证成功，但保存失败',
+    profile_commit_failed_previous_restored:'网络保存失败，已恢复原网络',
+    profile_commit_failed_ap_restoring:'网络保存失败，正在恢复配网热点',
+    fallback_ap_restore_pending:'正在恢复配网热点'
+  };
+  const stateText = {online:'在线', provisioning:'等待配网', recovering:'正在恢复',
+    degraded:'网络异常', starting:'启动中', stopped:'已停止'};
   async function api(path, options) {
     const response = await fetch(path, options);
     const data = await response.json();
@@ -75,11 +90,15 @@
   async function refresh() {
     try {
       const status = await api('/v1/status');
-      $('agentState').textContent = status.state;
+      $('agentState').textContent = stateText[status.state] || status.state;
       $('wifi').textContent = status.network.ssid || status.network.connection_name || '未连接';
-      $('uplink').textContent = status.network.target_reachable ? '可用' : status.reason;
+      $('uplink').textContent = status.network.target_reachable
+        ? '可用' : (reasonText[status.reason] || '正在恢复');
       $('overlay').textContent = status.overlay.connected
         ? (status.overlay.virtual_ip || '在线') : '未连接';
+      const operation = status.provisioning || {};
+      if (operation.phase === 'failed') show(reasonText[operation.reason] || '连接失败', false);
+      if (operation.phase === 'succeeded') show('连接成功，正在恢复远程网络');
     } catch (_) { $('agentState').textContent = '服务不可用'; }
   }
   async function post(path, body) {
@@ -104,18 +123,31 @@
     } catch (error) { show(error.message, false); }
   };
   $('connect').onsubmit = async event => {
-    event.preventDefault(); show('正在连接并验证，请不要关闭页面…');
+    event.preventDefault();
+    const ssid = $('ssid').value, password = $('password').value;
+    const encoder = new TextEncoder();
+    const validPassword = !password || /^[0-9a-fA-F]{64}$/.test(password)
+      || (encoder.encode(password).length >= 8 && encoder.encode(password).length <= 63);
+    if (!ssid || encoder.encode(ssid).length > 32) {
+      show('网络名称不符合Wi‑Fi规范', false); return;
+    }
+    if (!validPassword || /[\0\r\n]/.test(password)) {
+      show('密码格式不符合Wi‑Fi规范', false); return;
+    }
+    $('connectButton').disabled = true; show('正在提交配网任务…');
     try {
-      await post('/v1/wifi/connect', {ssid:$('ssid').value, password:$('password').value});
-      $('password').value = ''; show('连接成功，正在恢复远程网络'); setTimeout(refresh, 1000);
-    } catch (error) { show(`连接失败：${error.message}，热点将自动恢复`, false); }
+      const result = await post('/v1/wifi/connect', {ssid, password});
+      $('password').value = '';
+      show(result.reason === 'queued_request_replaced'
+        ? '已更新为最新配网请求' : '已受理，设备正在验证网络');
+      setTimeout(refresh, 1500);
+    } catch (error) { show(reasonText[error.message] || `提交失败：${error.message}`, false); }
+    finally { $('connectButton').disabled = false; }
   };
   $('recover').onclick = () => post('/v1/network/recover')
     .then(() => show('已开始恢复')).catch(error => show(error.message, false));
   $('apStart').onclick = () => post('/v1/ap/start')
     .then(() => show('热点已启动')).catch(error => show(error.message, false));
-  $('apStop').onclick = () => post('/v1/ap/stop')
-    .then(() => show('热点已关闭')).catch(error => show(error.message, false));
   let lastActivityAt = 0;
   function noteActivity() {
     const now = Date.now();
