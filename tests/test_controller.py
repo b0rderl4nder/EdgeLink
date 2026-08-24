@@ -59,7 +59,10 @@ class FakeNetwork:
     def start_ap(self, ssid: str, password: str) -> bool:
         self.actions.append(f"start_ap:{ssid}")
         self.current = replace(
-            self.current, ap_active=True, connection_name="edgelink-provisioning"
+            self.current,
+            ap_active=True,
+            connection_name="edgelink-provisioning",
+            ssid=ssid,
         )
         return True
 
@@ -166,6 +169,38 @@ def test_product_template_uses_exact_ssid_without_repeated_device_name(monkeypat
 
     assert controller.start_ap()
     assert network.actions == ["start_ap:Zebao-1"]
+
+
+def test_foreign_legacy_ap_is_reconciled_to_product_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    network = FakeNetwork(
+        replace(
+            offline_network(),
+            ap_active=True,
+            connection_name="Hotspot",
+            ssid="reachy-mini-ap",
+        )
+    )
+    product = replace(
+        config(),
+        device_name="zebao-1",
+        access_point=AccessPointConfig(
+            enabled=True,
+            connection_name="Hotspot",
+            ssid="Zebao-1",
+            ssid_prefix="Zebao",
+            reuse_existing_profile=True,
+        ),
+    )
+    controller = EdgeLinkController(product, network, FakeOverlay(OverlaySnapshot()))
+
+    status = controller.tick()
+
+    assert status.state is AgentState.PROVISIONING
+    assert status.reason == "fallback_ap_reconciled"
+    assert status.counters.ap_reconciliations == 1
+    assert network.actions == ["start_ap:Zebao-1"]
+    assert network.current.ssid == "Zebao-1"
 
 
 def test_overlay_failure_never_starts_ap(monkeypatch) -> None:

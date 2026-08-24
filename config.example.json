@@ -1,5 +1,5 @@
 {
-  "device_name": "zebao-0",
+  "device_name": "edge-device",
   "tick_seconds": 2,
   "wifi": {
     "interface": "wlan0",

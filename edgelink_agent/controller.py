@@ -150,6 +150,14 @@ class EdgeLinkController:
         outage_seconds = now - self._bad_since
 
         if network.ap_active:
+            expected_ssid = access_point_ssid(self.config)
+            if network.ssid and network.ssid != expected_ssid:
+                if self._start_ap_locked():
+                    self._status.counters.ap_reconciliations += 1
+                    self._transition(AgentState.PROVISIONING, "fallback_ap_reconciled")
+                else:
+                    self._transition(AgentState.DEGRADED, "fallback_ap_reconcile_failed")
+                return
             if not self._ap_observed:
                 self._ap_observed = True
                 self._last_provisioning_activity = now

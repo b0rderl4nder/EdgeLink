@@ -72,6 +72,7 @@ class Counters:
     reconnect_attempts: int = 0
     ap_starts: int = 0
     ap_stops: int = 0
+    ap_reconciliations: int = 0
     overlay_starts: int = 0
     overlay_restarts: int = 0
     provisioning_successes: int = 0
@@ -94,4 +95,3 @@ class AgentStatus:
         payload = asdict(self)
         payload["state"] = self.state.value
         return payload
-
