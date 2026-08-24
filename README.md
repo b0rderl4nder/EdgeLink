@@ -29,8 +29,8 @@ sudo ./scripts/enroll_easytier.sh \
 脚本不会联网下载浮动版本，不会生成、读取或打印你的网络密钥；配置按`0600`安装。
 
 ```bash
-tar -xzf edgelink-agent-0.1.0.tar.gz
-cd edgelink-agent-0.1.0
+tar -xzf edgelink-agent-0.1.1.tar.gz
+cd edgelink-agent-0.1.1
 sudo ./scripts/install.sh
 sudo edgelinkctl preflight
 edgelinkctl status
@@ -49,10 +49,10 @@ sudo EDGELINK_CONFIG_SOURCE=deploy/examples/zebao0.json ./scripts/install.sh
 设备失去可用上行网络达到设定阈值后会发出：
 
 ```text
-reachy-mini-ap-<设备名>
+Zebao-0
 ```
 
-连接热点后访问`http://10.42.0.1:8787/`。新网络验证失败时页面可能短暂断开，Agent会重新发出AP。
+泽宝设备使用`Zebao-<编号>`，其他产品可在设备模板中配置自己的完整SSID；不暴露底层开发板品牌。连接热点后访问`http://10.42.0.1:8787/`。新网络验证失败时页面可能短暂断开，Agent会重新发出AP。
 
 ## 本地命令
 

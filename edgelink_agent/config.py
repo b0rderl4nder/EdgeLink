@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,8 @@ class WifiConfig:
 class AccessPointConfig:
     enabled: bool = True
     connection_name: str = "edgelink-provisioning"
-    ssid_prefix: str = "reachy-mini-ap"
+    ssid: str = ""
+    ssid_prefix: str = "EdgeLink"
     password_env: str = "EDGELINK_AP_PASSWORD"
     ipv4_cidr: str = "10.42.0.1/24"
     reuse_existing_profile: bool = False
@@ -75,6 +77,16 @@ class AgentConfig:
     health: HealthConfig = field(default_factory=HealthConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+
+
+def access_point_ssid(config: AgentConfig) -> str:
+    """Return the configured product SSID without exposing implementation brands."""
+    exact = " ".join(config.access_point.ssid.split())[:32]
+    if exact:
+        return exact
+    prefix = re.sub(r"[^a-zA-Z0-9-]", "-", config.access_point.ssid_prefix).strip("-")
+    device = re.sub(r"[^a-zA-Z0-9-]", "-", config.device_name).strip("-").lower()
+    return f"{prefix or 'EdgeLink'}-{(device[-16:] or 'device')}"[:32]
 
 
 def _mapping(value: object) -> dict[str, Any]:

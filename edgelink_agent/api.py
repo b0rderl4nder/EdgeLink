@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from . import __version__
-from .config import AgentConfig
+from .config import AgentConfig, access_point_ssid
 from .controller import EdgeLinkController
 from .ports import NetworkPort
 
@@ -95,6 +95,7 @@ def _handler_factory(
                     {
                         "ok": True,
                         "device_name": config.device_name,
+                        "ap_ssid": access_point_ssid(config),
                         "ap_ssid_prefix": config.access_point.ssid_prefix,
                     },
                 )

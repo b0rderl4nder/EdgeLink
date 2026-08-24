@@ -147,7 +147,25 @@ def test_offline_retries_then_starts_fallback_ap(monkeypatch) -> None:
 
     assert status.state is AgentState.PROVISIONING
     assert sum(action == "reconnect" for action in network.actions) == 2
-    assert any(action.startswith("start_ap:reachy-mini-ap-zebao-0") for action in network.actions)
+    assert any(action.startswith("start_ap:EdgeLink-zebao-0") for action in network.actions)
+
+
+def test_product_template_uses_exact_ssid_without_repeated_device_name(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    network = FakeNetwork(offline_network())
+    product = replace(
+        config(),
+        device_name="zebao-1",
+        access_point=AccessPointConfig(
+            enabled=True,
+            ssid="Zebao-1",
+            ssid_prefix="Zebao",
+        ),
+    )
+    controller = EdgeLinkController(product, network, FakeOverlay(OverlaySnapshot()))
+
+    assert controller.start_ap()
+    assert network.actions == ["start_ap:Zebao-1"]
 
 
 def test_overlay_failure_never_starts_ap(monkeypatch) -> None:
@@ -176,7 +194,7 @@ def test_failed_provisioning_restores_ap(monkeypatch) -> None:
 
     assert not ok
     assert reason == "connection_failed"
-    assert network.actions == ["stop_ap", "connect:New WiFi", "start_ap:reachy-mini-ap-zebao-0"]
+    assert network.actions == ["stop_ap", "connect:New WiFi", "start_ap:EdgeLink-zebao-0"]
 
 
 def test_successful_provisioning_keeps_new_network(monkeypatch) -> None:
@@ -221,7 +239,7 @@ def test_active_provisioning_page_holds_ap_then_idle_retry_restores_it(monkeypat
     clock.advance(5)
     status = controller.tick()
     assert status.state is AgentState.PROVISIONING
-    assert network.actions == ["stop_ap", "reconnect", "start_ap:reachy-mini-ap-zebao-0"]
+    assert network.actions == ["stop_ap", "reconnect", "start_ap:EdgeLink-zebao-0"]
 
 
 def test_network_event_timestamp_is_consumed_on_next_tick() -> None:

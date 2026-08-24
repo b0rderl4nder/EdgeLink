@@ -16,7 +16,8 @@
   "access_point": {
     "enabled": true,
     "connection_name": "Hotspot",
-    "ssid_prefix": "reachy-mini-ap",
+    "ssid": "Zebao-0",
+    "ssid_prefix": "Zebao",
     "password_env": "EDGELINK_AP_PASSWORD",
     "ipv4_cidr": "10.42.0.1/24",
     "reuse_existing_profile": true

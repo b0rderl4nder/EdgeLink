@@ -74,13 +74,17 @@ def test_http_status_scan_and_secret_free_failed_connect() -> None:
     try:
         status_code, status = _json_request(f"{base}/v1/status")
         assert status_code == 200
-        assert status["version"] == "0.1.0"
+        assert status["version"] == "0.1.1"
         assert "commit" in status["build"]
         assert status["network"]["ssid"] == "Test WiFi"
 
         status_code, scan = _json_request(f"{base}/v1/wifi/scan")
         assert status_code == 200
         assert scan["networks"][0]["ssid"] == "Test WiFi"
+
+        status_code, public_config = _json_request(f"{base}/v1/config/public")
+        assert status_code == 200
+        assert public_config["ap_ssid"] == "EdgeLink-test-device"
 
         status_code, failure = _json_request(
             f"{base}/v1/wifi/connect",

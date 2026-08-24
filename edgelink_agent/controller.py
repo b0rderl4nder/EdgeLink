@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import replace
 
-from .config import AgentConfig
+from .config import AgentConfig, access_point_ssid
 from .models import AgentState, AgentStatus, NetworkSnapshot
 from .ports import Clock, NetworkPort, OverlayPort
 
@@ -247,7 +247,7 @@ class EdgeLinkController:
             LOGGER.error("AP password is not configured")
             return False
         self._last_ap_action_at = self._clock.monotonic()
-        ssid = f"{self.config.access_point.ssid_prefix}-{_device_suffix(self.config.device_name)}"
+        ssid = access_point_ssid(self.config)
         result = self._network.start_ap(ssid, password)
         if result:
             self._status.counters.ap_starts += 1
@@ -280,11 +280,6 @@ class EdgeLinkController:
             self._status.state_changed_at = self._clock.time()
         if state in {AgentState.ONLINE, AgentState.PROVISIONING}:
             self._status.next_action_at = None
-
-
-def _device_suffix(device_name: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9-]", "-", device_name).strip("-").lower()
-    return safe[-16:] or "device"
 
 
 def _network_reason(snapshot: NetworkSnapshot) -> str:

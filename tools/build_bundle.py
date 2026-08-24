@@ -7,9 +7,11 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from edgelink_agent import __version__
+
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
-VERSION = "0.1.0"
+VERSION = __version__
 INCLUDES = (
     "edgelink_agent",
     "deploy",
