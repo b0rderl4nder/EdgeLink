@@ -71,6 +71,8 @@ class Counters:
     uplink_failures: int = 0
     reconnect_attempts: int = 0
     ap_starts: int = 0
+    ap_start_failures: int = 0
+    ap_restore_retries: int = 0
     ap_stops: int = 0
     ap_reconciliations: int = 0
     overlay_starts: int = 0

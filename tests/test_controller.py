@@ -35,6 +35,7 @@ class FakeNetwork:
         self.actions: list[str] = []
         self.connect_result = False
         self.connected_snapshot: NetworkSnapshot | None = None
+        self.start_ap_results: list[bool] = []
 
     def snapshot(self) -> NetworkSnapshot:
         return self.current
@@ -56,8 +57,15 @@ class FakeNetwork:
         self.actions.append(f"forget:{connection_name}")
         return True
 
+    def suspend(self, ssid: str) -> bool:
+        self.actions.append(f"suspend:{ssid}")
+        return True
+
     def start_ap(self, ssid: str, password: str) -> bool:
         self.actions.append(f"start_ap:{ssid}")
+        result = self.start_ap_results.pop(0) if self.start_ap_results else True
+        if not result:
+            return False
         self.current = replace(
             self.current,
             ap_active=True,
@@ -229,7 +237,79 @@ def test_failed_provisioning_restores_ap(monkeypatch) -> None:
 
     assert not ok
     assert reason == "connection_failed"
-    assert network.actions == ["stop_ap", "connect:New WiFi", "start_ap:EdgeLink-zebao-0"]
+    assert network.actions == [
+        "stop_ap",
+        "connect:New WiFi",
+        "suspend:New WiFi",
+        "start_ap:EdgeLink-zebao-0",
+    ]
+
+
+def test_failed_provisioning_retries_ap_restore_without_long_cooldown(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(replace(offline_network(), ap_active=True))
+    network.start_ap_results = [False, True]
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+    controller.tick()
+
+    ok, reason = controller.provision_wifi("New WiFi", "12345678")
+
+    assert not ok
+    assert reason == "connection_failed_ap_restoring"
+    assert "suspend:New WiFi" in network.actions
+    assert controller.status().reason == "fallback_ap_restore_pending"
+    assert controller.status().counters.ap_start_failures == 1
+
+    clock.advance(2)
+    assert controller.tick().reason == "fallback_ap_restore_pending"
+    assert len([item for item in network.actions if item.startswith("start_ap:")]) == 1
+
+    clock.advance(1)
+    status = controller.tick()
+    assert status.state is AgentState.PROVISIONING
+    assert status.reason == "fallback_ap_restored"
+    assert status.counters.ap_restore_retries == 1
+    assert status.counters.ap_starts == 1
+    assert network.current.ap_active
+
+
+def test_normal_fallback_retries_failed_ap_start_quickly(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(offline_network())
+    network.start_ap_results = [False, True]
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+
+    controller.tick()
+    clock.advance(3)
+    controller.tick()
+    clock.advance(8)
+    pending = controller.tick()
+    assert pending.reason == "fallback_ap_restore_pending"
+
+    clock.advance(3)
+    restored = controller.tick()
+    assert restored.state is AgentState.PROVISIONING
+    assert restored.reason == "fallback_ap_restored"
+    assert restored.counters.ap_start_failures == 1
+    assert restored.counters.ap_restore_retries == 1
+
+
+def test_explicit_stop_cancels_pending_ap_restore(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(offline_network())
+    network.start_ap_results = [False]
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+
+    assert not controller.start_ap()
+    assert controller.status().reason == "fallback_ap_restore_pending"
+    assert controller.stop_ap()
+    clock.advance(3)
+    controller.tick()
+
+    assert len([item for item in network.actions if item.startswith("start_ap:")]) == 1
 
 
 def test_successful_provisioning_keeps_new_network(monkeypatch) -> None:

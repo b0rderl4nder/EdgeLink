@@ -8,6 +8,7 @@
     "reconnect_attempts_before_ap": 3,
     "ap_fallback_seconds": 60,
     "recovery_cooldown_seconds": 120,
+    "ap_restore_retry_seconds": 3,
     "stable_before_ap_stop_seconds": 8,
     "auto_retry_saved_profiles": true,
     "ap_saved_retry_seconds": 180,

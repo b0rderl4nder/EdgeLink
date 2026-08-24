@@ -91,3 +91,16 @@ def test_connect_resets_stale_static_network_settings_and_hides_password() -> No
     assert modify[modify.index("ipv4.gateway") + 1] == ""
     assert modify[modify.index("ipv4.dns") + 1] == ""
     assert "passwd-file" in flattened
+
+
+def test_suspending_failed_profile_prevents_it_from_stealing_ap() -> None:
+    runner = RecordingRunner()
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
+    )
+
+    assert adapter.suspend("Unavailable WiFi")
+
+    modify = runner.calls[-1]
+    assert modify[:4] == ("nmcli", "connection", "modify", _profile_name("Unavailable WiFi"))
+    assert modify[-2:] == ("connection.autoconnect", "no")

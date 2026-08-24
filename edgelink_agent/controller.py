@@ -55,6 +55,7 @@ class EdgeLinkController:
         self._last_overlay_action_at = float("-inf")
         self._last_provisioning_activity = float("-inf")
         self._ap_observed = False
+        self._ap_restore_pending = False
         self._reconnects_in_outage = 0
         self._lock = threading.RLock()
         self._event_lock = threading.Lock()
@@ -113,6 +114,7 @@ class EdgeLinkController:
     ) -> None:
         if self._good_since is None:
             self._good_since = now
+        self._ap_restore_pending = False
         self._bad_since = None
         self._reconnects_in_outage = 0
 
@@ -149,6 +151,24 @@ class EdgeLinkController:
             self._bad_since = now
         outage_seconds = now - self._bad_since
 
+        if self._ap_restore_pending:
+            expected_ssid = access_point_ssid(self.config)
+            if network.ap_active and network.ssid == expected_ssid:
+                self._ap_restore_pending = False
+            else:
+                retry_seconds = self.config.wifi.ap_restore_retry_seconds
+                wait_seconds = retry_seconds - (now - self._last_ap_action_at)
+                if wait_seconds <= 0:
+                    self._status.counters.ap_restore_retries += 1
+                    if self._start_ap_locked():
+                        self._ap_restore_pending = False
+                        self._transition(AgentState.PROVISIONING, "fallback_ap_restored")
+                        return
+                    wait_seconds = retry_seconds
+                self._status.next_action_at = self._clock.time() + max(0.0, wait_seconds)
+                self._transition(AgentState.RECOVERING, "fallback_ap_restore_pending")
+                return
+
         if network.ap_active:
             expected_ssid = access_point_ssid(self.config)
             if network.ssid and network.ssid != expected_ssid:
@@ -156,7 +176,7 @@ class EdgeLinkController:
                     self._status.counters.ap_reconciliations += 1
                     self._transition(AgentState.PROVISIONING, "fallback_ap_reconciled")
                 else:
-                    self._transition(AgentState.DEGRADED, "fallback_ap_reconcile_failed")
+                    self._queue_ap_restore_locked()
                 return
             if not self._ap_observed:
                 self._ap_observed = True
@@ -178,7 +198,9 @@ class EdgeLinkController:
                 if self._network.reconnect_saved():
                     self._transition(AgentState.RECOVERING, "retrying_saved_wifi_from_ap")
                     return
-                self._start_ap_locked()
+                if not self._start_ap_locked():
+                    self._queue_ap_restore_locked()
+                    return
             self._transition(AgentState.PROVISIONING, "fallback_ap_active")
             wait_seconds = max(
                 self.config.wifi.ap_client_hold_seconds - quiet_seconds,
@@ -208,16 +230,18 @@ class EdgeLinkController:
             self._network.reconnect_saved()
             return
 
-        if (
-            outage_seconds >= grace
-            and self.config.access_point.enabled
-            and now - self._last_ap_action_at >= self.config.wifi.recovery_cooldown_seconds
-            and self._start_ap_locked()
-        ):
-            self._transition(AgentState.PROVISIONING, "fallback_ap_started")
-            return
         if outage_seconds >= grace and self.config.access_point.enabled:
-            self._transition(AgentState.DEGRADED, "fallback_ap_failed")
+            if now - self._last_ap_action_at >= self.config.wifi.recovery_cooldown_seconds:
+                if self._start_ap_locked():
+                    self._transition(AgentState.PROVISIONING, "fallback_ap_started")
+                else:
+                    self._queue_ap_restore_locked()
+                return
+            self._status.next_action_at = self._clock.time() + max(
+                0.0,
+                self.config.wifi.recovery_cooldown_seconds - (now - self._last_ap_action_at),
+            )
+            self._transition(AgentState.DEGRADED, "fallback_ap_cooldown")
             return
 
         self._status.next_action_at = self._clock.time() + max(0.0, grace - outage_seconds)
@@ -236,35 +260,63 @@ class EdgeLinkController:
             verified = self._network.snapshot() if connected else None
             if connected and verified is not None and verified.uplink_ready:
                 self._status.counters.provisioning_successes += 1
+                self._ap_restore_pending = False
                 self._bad_since = None
                 self._good_since = self._clock.monotonic()
                 self._wake.set()
                 return True, "connected"
             self._status.counters.provisioning_failures += 1
+            if not self._network.suspend(ssid):
+                LOGGER.warning("failed Wi-Fi profile could not be suspended")
             if was_ap or self.config.access_point.enabled:
-                self._start_ap_locked()
+                if not self._start_ap_locked():
+                    self._queue_ap_restore_locked()
+                    reason = (
+                        "connection_not_usable_ap_restoring"
+                        if connected
+                        else "connection_failed_ap_restoring"
+                    )
+                    return False, reason
+                self._transition(AgentState.PROVISIONING, "fallback_ap_restored")
             return False, "connection_not_usable" if connected else "connection_failed"
 
     def start_ap(self) -> bool:
         with self._lock:
-            return self._start_ap_locked()
+            result = self._start_ap_locked()
+            if result:
+                self._ap_restore_pending = False
+            else:
+                self._queue_ap_restore_locked()
+            return result
 
     def _start_ap_locked(self) -> bool:
+        self._last_ap_action_at = self._clock.monotonic()
         password = os.getenv(self.config.access_point.password_env, "")
         if len(password) < 8:
             LOGGER.error("AP password is not configured")
+            self._status.counters.ap_start_failures += 1
             return False
-        self._last_ap_action_at = self._clock.monotonic()
         ssid = access_point_ssid(self.config)
         result = self._network.start_ap(ssid, password)
         if result:
             self._status.counters.ap_starts += 1
             self._ap_observed = True
             self._last_provisioning_activity = self._clock.monotonic()
+        else:
+            self._status.counters.ap_start_failures += 1
         return result
+
+    def _queue_ap_restore_locked(self) -> None:
+        self._ap_restore_pending = True
+        self._status.next_action_at = (
+            self._clock.time() + self.config.wifi.ap_restore_retry_seconds
+        )
+        self._transition(AgentState.RECOVERING, "fallback_ap_restore_pending")
+        self._wake.set()
 
     def stop_ap(self) -> bool:
         with self._lock:
+            self._ap_restore_pending = False
             self._last_ap_action_at = self._clock.monotonic()
             result = self._network.stop_ap()
             if result:

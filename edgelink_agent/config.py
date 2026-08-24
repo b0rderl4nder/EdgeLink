@@ -16,6 +16,7 @@ class WifiConfig:
     reconnect_attempts_before_ap: int = 3
     ap_fallback_seconds: float = 60.0
     recovery_cooldown_seconds: float = 120.0
+    ap_restore_retry_seconds: float = 3.0
     stable_before_ap_stop_seconds: float = 8.0
     auto_retry_saved_profiles: bool = True
     ap_saved_retry_seconds: float = 180.0

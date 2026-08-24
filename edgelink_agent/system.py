@@ -261,6 +261,19 @@ class NetworkManagerAdapter:
             return False
         return self._run("nmcli", "connection", "delete", connection_name).returncode == 0
 
+    def suspend(self, ssid: str) -> bool:
+        """Keep a failed EdgeLink profile without allowing it to steal the AP."""
+        profile = _profile_name(ssid)
+        result = self._run(
+            "nmcli",
+            "connection",
+            "modify",
+            profile,
+            "connection.autoconnect",
+            "no",
+        )
+        return result.returncode == 0
+
     def start_ap(self, ssid: str, password: str) -> bool:
         profile = self._ap.connection_name
         exists = self._run("nmcli", "-g", "NAME", "connection", "show", profile).returncode == 0

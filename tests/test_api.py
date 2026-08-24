@@ -26,6 +26,9 @@ class ApiNetwork:
     def forget(self, connection_name: str) -> bool:
         return True
 
+    def suspend(self, ssid: str) -> bool:
+        return True
+
     def start_ap(self, ssid: str, password: str) -> bool:
         return True
 
@@ -74,7 +77,7 @@ def test_http_status_scan_and_secret_free_failed_connect() -> None:
     try:
         status_code, status = _json_request(f"{base}/v1/status")
         assert status_code == 200
-        assert status["version"] == "0.1.3"
+        assert status["version"] == "0.1.4"
         assert "commit" in status["build"]
         assert status["network"]["ssid"] == "Test WiFi"
 
@@ -95,7 +98,7 @@ def test_http_status_scan_and_secret_free_failed_connect() -> None:
         assert failure == {
             "ok": False,
             "ssid": "Another WiFi",
-            "reason": "connection_failed",
+            "reason": "connection_failed_ap_restoring",
         }
         assert "never-return-this" not in json.dumps(failure)
 
