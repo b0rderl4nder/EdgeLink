@@ -52,7 +52,7 @@ class HotspotRunner:
         return CommandResult(0, "")
 
 
-def test_existing_product_hotspot_is_reused_without_rewriting_secret() -> None:
+def test_existing_product_hotspot_is_reconciled_without_exposing_secret() -> None:
     runner = HotspotRunner()
     adapter = NetworkManagerAdapter(
         WifiConfig(),
@@ -61,11 +61,13 @@ def test_existing_product_hotspot_is_reused_without_rewriting_secret() -> None:
         runner=runner,
     )
 
-    assert adapter.start_ap("ignored", "new-password")
+    assert adapter.start_ap("Zebao-1", "new-password")
 
     flattened = " ".join(part for call in runner.calls for part in call)
     assert "connection up Hotspot" in flattened
-    assert "connection modify" not in flattened
+    assert "connection modify Hotspot" in flattened
+    assert "802-11-wireless.ssid Zebao-1" in flattened
+    assert "passwd-file" in flattened
     assert "new-password" not in flattened
 
 

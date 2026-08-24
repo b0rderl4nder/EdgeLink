@@ -264,10 +264,6 @@ class NetworkManagerAdapter:
     def start_ap(self, ssid: str, password: str) -> bool:
         profile = self._ap.connection_name
         exists = self._run("nmcli", "-g", "NAME", "connection", "show", profile).returncode == 0
-        if exists and self._ap.reuse_existing_profile:
-            return self._run(
-                "nmcli", "--wait", "20", "connection", "up", profile, timeout=25.0
-            ).returncode == 0
         if not exists:
             created = self._run(
                 "nmcli", "connection", "add", "type", "wifi", "ifname", self._wifi.interface,
@@ -277,6 +273,7 @@ class NetworkManagerAdapter:
                 return False
         modified = self._run(
             "nmcli", "connection", "modify", profile,
+            "802-11-wireless.ssid", ssid,
             "802-11-wireless.mode", "ap",
             "802-11-wireless.band", "bg",
             "802-11-wireless-security.key-mgmt", "wpa-psk",

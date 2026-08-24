@@ -74,7 +74,7 @@ def test_http_status_scan_and_secret_free_failed_connect() -> None:
     try:
         status_code, status = _json_request(f"{base}/v1/status")
         assert status_code == 200
-        assert status["version"] == "0.1.1"
+        assert status["version"] == "0.1.2"
         assert "commit" in status["build"]
         assert status["network"]["ssid"] == "Test WiFi"
 

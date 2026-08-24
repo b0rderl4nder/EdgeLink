@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "edgelink-agent"
-version = "0.1.1"
+version = "0.1.2"
 description = "Portable Wi-Fi provisioning, AP fallback and overlay recovery agent for edge devices"
 requires-python = ">=3.10"
 dependencies = []
