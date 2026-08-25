@@ -238,10 +238,13 @@ class EdgeLinkController:
             if retry_due:
                 self._last_reconnect_at = now
                 self._status.counters.reconnect_attempts += 1
-                self._network.stop_ap()
-                if self._network.reconnect_saved():
+                if self._attempt_saved_reconnect_locked():
                     self._uplink_settle_until = now + self.config.wifi.reconnect_settle_seconds
                     self._transition(AgentState.RECOVERING, "retrying_saved_wifi_from_ap")
+                    return
+                restored = self._network.snapshot()
+                if restored.ap_active:
+                    self._transition(AgentState.PROVISIONING, "fallback_ap_restored")
                     return
                 if not self._start_ap_locked():
                     self._queue_ap_restore_locked()
@@ -277,7 +280,7 @@ class EdgeLinkController:
             self._reconnects_in_outage += 1
             self._status.counters.reconnect_attempts += 1
             self._transition(AgentState.RECOVERING, "retrying_saved_wifi")
-            if self._network.reconnect_saved():
+            if self._attempt_saved_reconnect_locked():
                 self._uplink_settle_until = now + self.config.wifi.reconnect_settle_seconds
             return
 
@@ -428,7 +431,7 @@ class EdgeLinkController:
         if was_ap:
             self._network.stop_ap()
         attempt = self._network.connect(ssid, password)
-        verified = self._network.snapshot() if attempt.ok else None
+        verified = self._wait_for_valid_uplink_locked() if attempt.ok else None
         if attempt.ok and verified is not None and verified.uplink_ready:
             if self._network.commit(ssid):
                 if not checkpoint or self._network.commit_checkpoint(checkpoint):
@@ -556,7 +559,7 @@ class EdgeLinkController:
         with self._lock:
             self._last_reconnect_at = self._clock.monotonic()
             self._status.counters.reconnect_attempts += 1
-            result = self._network.reconnect_saved()
+            result = self._attempt_saved_reconnect_locked()
             if result:
                 self._uplink_settle_until = (
                     self._clock.monotonic() + self.config.wifi.reconnect_settle_seconds
@@ -564,6 +567,76 @@ class EdgeLinkController:
             self._wake.set()
             self._publish_status_locked()
             return result
+
+    def _attempt_saved_reconnect_locked(self) -> bool:
+        """Switch to a saved uplink without ever stranding the current AP.
+
+        NetworkManager's checkpoint is scoped to the Wi-Fi device, so Ethernet and
+        EasyTier remain outside this transaction.  A reconnect counts as success
+        only after the resulting connection is a validated non-AP uplink; merely
+        remaining attached to the current hotspot is not success.
+        """
+        checkpoint = self._network.begin_checkpoint(
+            self.config.wifi.checkpoint_timeout_seconds
+        )
+        self._active_checkpoint = checkpoint
+        if checkpoint:
+            self._status.counters.checkpoints_created += 1
+        else:
+            self._status.counters.checkpoint_fallbacks += 1
+        try:
+            reconnected = self._network.reconnect_saved()
+            verified = self._wait_for_valid_uplink_locked() if reconnected else None
+        except Exception:
+            if checkpoint and self._network.rollback_checkpoint(checkpoint):
+                self._status.counters.checkpoints_rolled_back += 1
+            elif checkpoint:
+                self._network.commit_checkpoint(checkpoint)
+                self._status.counters.checkpoint_fallbacks += 1
+            self._active_checkpoint = ""
+            raise
+
+        if (
+            reconnected
+            and verified is not None
+            and verified.uplink_ready
+            and not verified.ap_active
+            and (not checkpoint or self._network.commit_checkpoint(checkpoint))
+        ):
+            if checkpoint:
+                self._status.counters.checkpoints_committed += 1
+            self._active_checkpoint = ""
+            return True
+
+        if checkpoint and self._network.rollback_checkpoint(checkpoint):
+            self._status.counters.checkpoints_rolled_back += 1
+        elif checkpoint:
+            # Destroy the checkpoint if explicit rollback failed; otherwise its
+            # timeout could undo the independent AP recovery at a later time.
+            self._network.commit_checkpoint(checkpoint)
+            self._status.counters.checkpoint_fallbacks += 1
+        self._active_checkpoint = ""
+        return False
+
+    def _wait_for_valid_uplink_locked(self) -> NetworkSnapshot:
+        """Allow DHCP, routes and health evidence to settle before committing.
+
+        ``nmcli connection up`` returns when NetworkManager marks the profile
+        activated, which can precede DNS and target reachability by a short period.
+        Committing or rolling back at that instant made valid Wi-Fi look broken.
+        """
+        deadline = (
+            self._clock.monotonic() + self.config.wifi.reconnect_settle_seconds
+        )
+        snapshot = self._network.snapshot()
+        while (
+            (not snapshot.uplink_ready or snapshot.ap_active)
+            and self._clock.monotonic() < deadline
+        ):
+            remaining = deadline - self._clock.monotonic()
+            self._clock.sleep(min(1.0, remaining))
+            snapshot = self._network.snapshot()
+        return snapshot
 
     def _transition(self, state: AgentState, reason: str) -> None:
         if self._status.state != state or self._status.reason != reason:

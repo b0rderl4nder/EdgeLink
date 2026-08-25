@@ -72,6 +72,8 @@ edgelinkctl preflight
 
 旧设备不知道原热点密码时，在设备本地终端执行`sudo edgelink-set-ap-password`安全设置新密码。输入不回显，密码不进入命令行、API或日志。
 
+“恢复已保存网络”同样是无线接口级事务：程序先建立NetworkManager检查点，再切离当前热点并选择已保存网络；只有验证为真实非AP上行后才提交，失败会恢复原热点。有线接口和EasyTier不在该检查点范围内。
+
 ## 构建离线包
 
 ```bash

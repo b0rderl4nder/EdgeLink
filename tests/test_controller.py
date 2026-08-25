@@ -51,8 +51,11 @@ class FakeNetwork:
         self.checkpoint = ""
         self.checkpoint_commit_result = True
         self.checkpoint_rollback_result = True
+        self.snapshot_results: list[NetworkSnapshot] = []
 
     def snapshot(self) -> NetworkSnapshot:
+        if self.snapshot_results:
+            self.current = self.snapshot_results.pop(0)
         return self.current
 
     def scan(self) -> list[WifiNetwork]:
@@ -60,6 +63,8 @@ class FakeNetwork:
 
     def reconnect_saved(self) -> bool:
         self.actions.append("reconnect")
+        if self.reconnect_result and self.connected_snapshot is not None:
+            self.current = self.connected_snapshot
         return self.reconnect_result
 
     def begin_checkpoint(self, timeout_seconds: int) -> str:
@@ -220,23 +225,125 @@ def test_offline_retries_then_starts_fallback_ap(monkeypatch) -> None:
     assert any(action.startswith("start_ap:EdgeLink-zebao-0") for action in network.actions)
 
 
-def test_successful_reconnect_gets_a_settle_window_before_ap_fallback(monkeypatch) -> None:
+def test_successful_reconnect_is_observed_as_healthy_before_ap_fallback(monkeypatch) -> None:
     monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
     clock = FakeClock()
     network = FakeNetwork(offline_network())
     network.reconnect_result = True
+    network.connected_snapshot = healthy_network()
     controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
 
     controller.tick()
     clock.advance(3)
     status = controller.tick()
 
-    assert status.reason == "uplink_settling"
+    assert status.reason == "overlay_starting"
     assert network.actions == ["reconnect"]
     assert not any(action.startswith("start_ap:") for action in network.actions)
 
     clock.advance(0.9)
-    assert controller.tick().reason == "uplink_settling"
+    assert controller.tick().reason == "overlay_starting"
+
+
+def test_saved_reconnect_is_checkpointed_and_must_leave_ap(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    daemon_ap = replace(
+        offline_network(),
+        link_up=True,
+        connection_name="Hotspot",
+        ssid="Zebao-1",
+        ipv4="10.42.0.1/24",
+        ap_active=True,
+    )
+    network = FakeNetwork(daemon_ap)
+    network.checkpoint = "/org/freedesktop/NetworkManager/Checkpoint/1"
+    network.reconnect_result = True
+    network.connected_snapshot = healthy_network()
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()))
+
+    assert controller.recover_now()
+    assert network.actions == [
+        "checkpoint_begin:90",
+        "reconnect",
+        "checkpoint_commit",
+    ]
+    assert controller.status().counters.checkpoints_committed == 1
+
+
+def test_saved_reconnect_waits_for_dhcp_and_health_before_commit(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    settling = NetworkSnapshot(
+        interface="wlan0",
+        link_up=True,
+        connection_name="Office",
+        ssid="Office",
+        ipv4="192.168.1.20/24",
+    )
+    network = FakeNetwork(offline_network())
+    network.checkpoint = "/org/freedesktop/NetworkManager/Checkpoint/1"
+    network.reconnect_result = True
+    network.connected_snapshot = settling
+    network.snapshot_results = [settling, settling, healthy_network()]
+    controller = EdgeLinkController(
+        config(), network, FakeOverlay(OverlaySnapshot()), clock
+    )
+
+    assert controller.recover_now()
+    assert clock.monotonic() == 1002.0
+    assert network.actions[-1] == "checkpoint_commit"
+
+
+def test_new_wifi_waits_for_health_before_committing_profile(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    settling = NetworkSnapshot(
+        interface="wlan0",
+        link_up=True,
+        connection_name="candidate",
+        ssid="Candidate WiFi",
+        ipv4="192.168.1.30/24",
+    )
+    network = FakeNetwork(healthy_network())
+    network.checkpoint = "/org/freedesktop/NetworkManager/Checkpoint/1"
+    network.connect_result = True
+    network.connected_snapshot = settling
+    network.snapshot_results = [healthy_network(), settling, healthy_network()]
+    controller = EdgeLinkController(
+        config(), network, FakeOverlay(OverlaySnapshot()), clock
+    )
+
+    assert controller.provision_wifi("Candidate WiFi", "12345678") == (
+        True,
+        "connected",
+    )
+    assert clock.monotonic() == 1001.0
+    assert network.actions[-2:] == ["commit:Candidate WiFi", "checkpoint_commit"]
+
+
+def test_failed_saved_reconnect_rolls_back_exact_daemon_ap(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    daemon_ap = replace(
+        offline_network(),
+        link_up=True,
+        connection_name="Hotspot",
+        ssid="Zebao-1",
+        ipv4="10.42.0.1/24",
+        ap_active=True,
+    )
+    network = FakeNetwork(daemon_ap)
+    network.checkpoint = "/org/freedesktop/NetworkManager/Checkpoint/1"
+    network.restored_snapshot = daemon_ap
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()))
+
+    assert not controller.recover_now()
+    assert network.actions == [
+        "checkpoint_begin:90",
+        "reconnect",
+        "checkpoint_rollback",
+    ]
+    assert network.current == daemon_ap
+    assert controller.status().counters.checkpoints_rolled_back == 1
 
 
 def test_product_template_uses_exact_ssid_without_repeated_device_name(monkeypatch) -> None:
@@ -638,7 +745,7 @@ def test_invalid_credentials_do_not_touch_network() -> None:
     assert network.actions == []
 
 
-def test_active_provisioning_page_holds_ap_then_idle_retry_restores_it(monkeypatch) -> None:
+def test_active_provisioning_page_holds_ap_then_failed_retry_keeps_it(monkeypatch) -> None:
     monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
     clock = FakeClock()
     network = FakeNetwork(replace(offline_network(), ap_active=True))
@@ -654,7 +761,9 @@ def test_active_provisioning_page_holds_ap_then_idle_retry_restores_it(monkeypat
     clock.advance(5)
     status = controller.tick()
     assert status.state is AgentState.PROVISIONING
-    assert network.actions == ["stop_ap", "reconnect", "start_ap:EdgeLink-zebao-0"]
+    assert status.reason == "fallback_ap_restored"
+    assert network.actions == ["reconnect"]
+    assert network.current.ap_active
 
 
 def test_network_event_timestamp_is_consumed_on_next_tick() -> None:

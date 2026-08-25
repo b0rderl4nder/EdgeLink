@@ -114,6 +114,82 @@ def test_connect_resets_stale_static_network_settings_and_hides_password() -> No
     assert "passwd-file" in flattened
 
 
+class SavedReconnectRunner(RecordingRunner):
+    def __init__(self, *, visible: bool = True) -> None:
+        super().__init__()
+        self.visible = visible
+
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        call = tuple(args)
+        self.calls.append(call)
+        if call[:5] == ("nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL,SECURITY", "device"):
+            output = "yes:Zebao-1:0:WPA2\n"
+            if self.visible:
+                output += "no:LZWC:99:WPA2\n"
+            return CommandResult(0, output)
+        if call[:6] == (
+            "nmcli",
+            "-t",
+            "-f",
+            "UUID,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY",
+            "connection",
+            "show",
+        ):
+            return CommandResult(
+                0,
+                "daemon-ap:802-11-wireless:yes:100\n"
+                "office-wifi:802-11-wireless:yes:10\n",
+            )
+        if call[-3:] == ("connection", "show", "daemon-ap"):
+            return CommandResult(0, "Hotspot\nwlan0\nap\nZebao-1\n")
+        if call[-3:] == ("connection", "show", "office-wifi"):
+            return CommandResult(0, "LZWC\nwlan0\ninfrastructure\nLZWC\n")
+        return CommandResult(0, "")
+
+
+def test_reconnect_saved_selects_visible_non_ap_profile_by_uuid() -> None:
+    runner = SavedReconnectRunner()
+    adapter = NetworkManagerAdapter(
+        WifiConfig(),
+        AccessPointConfig(
+            connection_name="edgelink-provisioning",
+            reserved_connection_names=("Hotspot",),
+        ),
+        HealthConfig(),
+        runner=runner,
+    )
+
+    assert adapter.reconnect_saved()
+
+    assert runner.calls[-2] == (
+        "nmcli",
+        "--wait",
+        "10",
+        "device",
+        "disconnect",
+        "wlan0",
+    )
+    assert runner.calls[-1] == (
+        "nmcli",
+        "--wait",
+        "20",
+        "connection",
+        "up",
+        "uuid",
+        "office-wifi",
+    )
+
+
+def test_reconnect_saved_without_visible_infrastructure_keeps_ap_untouched() -> None:
+    runner = SavedReconnectRunner(visible=False)
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
+    )
+
+    assert not adapter.reconnect_saved()
+    assert not any("disconnect" in call for call in runner.calls)
+
+
 def test_suspending_failed_profile_prevents_it_from_stealing_ap() -> None:
     runner = RecordingRunner()
     adapter = NetworkManagerAdapter(

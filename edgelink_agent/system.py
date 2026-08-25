@@ -328,10 +328,81 @@ class NetworkManagerAdapter:
         return sorted(by_ssid.values(), key=lambda item: (not item.active, -item.signal, item.ssid))
 
     def reconnect_saved(self) -> bool:
-        result = self._run(
-            "nmcli", "--wait", "20", "device", "connect", self._wifi.interface, timeout=25.0
+        candidates = self._saved_wifi_candidates()
+        if not candidates:
+            return False
+        # ``nmcli device connect`` may simply reactivate the current AP.  Select an
+        # exact visible infrastructure profile by UUID instead; names are neither
+        # unique nor a reliable boundary on devices upgraded from older daemons.
+        # The controller wraps this switch in a device-scoped checkpoint, so a
+        # failed attempt restores the exact previous AP/profile automatically.
+        self._run(
+            "nmcli", "--wait", "10", "device", "disconnect", self._wifi.interface,
+            timeout=15.0,
         )
-        return result.returncode == 0
+        for profile_uuid in candidates[:3]:
+            result = self._run(
+                "nmcli", "--wait", "20", "connection", "up", "uuid", profile_uuid,
+                timeout=25.0,
+            )
+            if result.returncode == 0:
+                return True
+        return False
+
+    def _saved_wifi_candidates(self) -> list[str]:
+        visible = {
+            network.ssid: network.signal
+            for network in self.scan()
+            if network.ssid and not network.active
+        }
+        if not visible:
+            return []
+        profiles = self._run(
+            "nmcli", "-t", "-f",
+            "UUID,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY",
+            "connection", "show",
+        )
+        if profiles.returncode:
+            return []
+        candidates: list[tuple[int, int, str]] = []
+        for line in profiles.stdout.splitlines():
+            fields = _nm_split(line)
+            if len(fields) < 4:
+                continue
+            profile_uuid, connection_type, autoconnect, priority_text = fields[:4]
+            if connection_type.lower() not in {"802-11-wireless", "wifi"}:
+                continue
+            if autoconnect.lower() not in {"yes", "true"}:
+                continue
+            details = self._run(
+                "nmcli", "-g",
+                "connection.id,connection.interface-name,802-11-wireless.mode,802-11-wireless.ssid",
+                "connection", "show", profile_uuid,
+            )
+            if details.returncode:
+                continue
+            values = details.stdout.splitlines()
+            if len(values) < 4:
+                continue
+            connection_name = _nm_unescape(values[0].strip())
+            interface_name = values[1].strip()
+            mode = values[2].strip().lower()
+            ssid = _nm_unescape(values[3].strip())
+            if connection_name == self._ap.connection_name:
+                continue
+            if connection_name in self._ap.reserved_connection_names:
+                continue
+            if interface_name not in {"", "--", self._wifi.interface}:
+                continue
+            if mode not in {"", "infrastructure"} or ssid not in visible:
+                continue
+            try:
+                priority = int(priority_text)
+            except ValueError:
+                priority = 0
+            candidates.append((priority, visible[ssid], profile_uuid))
+        candidates.sort(reverse=True)
+        return [profile_uuid for _, _, profile_uuid in candidates]
 
     def connect(self, ssid: str, password: str) -> ConnectionAttempt:
         visible_before_switch = self._ssid_visibility(ssid)
