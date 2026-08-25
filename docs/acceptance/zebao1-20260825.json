@@ -1,0 +1,59 @@
+{
+  "device": "zebao-1",
+  "verified_at": "2026-08-25T18:48:00+08:00",
+  "release": {
+    "version": "0.3.2",
+    "commit": "922228fa89f9888ae3e4c14ad6b1f25104020a07",
+    "bundle_sha256": "d3abf6abcbf810f359e37cfafa6c80b0b3c016fec8d40747edd9f35493f00daa",
+    "backup_sha256": "135480a13d27139b0b2f1bc503c8c1bb565e472ac5973aba9bc9658d52ceef59"
+  },
+  "automated_gates": {
+    "pytest": "66 passed",
+    "ruff": "passed",
+    "mypy": "passed",
+    "compileall": "passed",
+    "bundle_build": "passed"
+  },
+  "real_device": {
+    "reserved_daemon_ap_idle_seconds": 180,
+    "reserved_daemon_ap_mutations": 0,
+    "failed_new_wifi": {
+      "result": "ssid_not_found_checkpoint_rolled_back",
+      "same_daemon_ap_uuid_restored": true,
+      "ethernet_preserved": true,
+      "easytier_preserved": true,
+      "temporary_profile_removed": true
+    },
+    "saved_wifi_recovery": {
+      "result": "online",
+      "network": "LZWC",
+      "health_level": "internet",
+      "checkpoint_committed": true
+    },
+    "wifi_only_external_access": {
+      "ethernet_temporarily_disabled": true,
+      "easytier_ssh_reachable": true,
+      "status_api_reachable": true,
+      "internet_health_passed": true,
+      "ethernet_restored": true
+    },
+    "cold_boot": {
+      "manual_intervention_required": false,
+      "wifi_recovered": true,
+      "easytier_recovered": true,
+      "edgelink_recovered": true,
+      "final_state": "online"
+    }
+  },
+  "final_network": {
+    "wifi_connection": "LZWC",
+    "ethernet_connection": "wired-rescue",
+    "overlay_ip": "192.167.111.213",
+    "edgelink_enabled": true,
+    "easytier_enabled": true
+  },
+  "not_verified": [
+    "0号机当时未出现在EasyTier Peer列表，未对离线设备声明完成同步",
+    "完全不同地点的新SSID仍需在该SSID实际可见时做最终现场输入验证"
+  ]
+}
