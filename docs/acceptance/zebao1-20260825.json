@@ -52,6 +52,18 @@
     "edgelink_enabled": true,
     "easytier_enabled": true
   },
+  "runtime_optimization": {
+    "version": "0.3.3",
+    "commit": "3fa83e4dd7f403b301af611c38dfe63a96c6fedd",
+    "bundle_sha256": "0e6c25a9b48cfee41bb4d646e9768f08f32f0c8655d0190affe3a53052f6b9bf",
+    "periodic_tick_seconds": 5,
+    "network_events_remain_immediate": true,
+    "cpu_sample_seconds": 90,
+    "cpu_time_seconds": 10.915729,
+    "single_core_average_percent": 12.13,
+    "previous_single_core_average_percent_approx": 23.0,
+    "state_after_sample": "online"
+  },
   "not_verified": [
     "0号机当时未出现在EasyTier Peer列表，未对离线设备声明完成同步",
     "完全不同地点的新SSID仍需在该SSID实际可见时做最终现场输入验证"
