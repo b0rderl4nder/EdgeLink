@@ -57,3 +57,21 @@ def test_legacy_noop_fields_are_migrated_without_remaining_in_public_model(tmp_p
     assert config.wifi.reconnect_settle_seconds == 9
     assert not hasattr(config.wifi, "stable_before_ap_stop_seconds")
     assert not hasattr(config.access_point, "reuse_existing_profile")
+
+
+def test_config_rejects_ap_profile_owned_by_another_controller(tmp_path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "access_point": {
+                    "connection_name": "Hotspot",
+                    "reserved_connection_names": ["Hotspot"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="reserved by another controller"):
+        load_config(path)

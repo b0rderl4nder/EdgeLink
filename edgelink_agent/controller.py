@@ -181,6 +181,20 @@ class EdgeLinkController:
             self._bad_since = now
         outage_seconds = now - self._bad_since
 
+        # A product daemon may intentionally own an independent recovery AP on
+        # the same radio.  Reserved profiles are a cooperative hand-off boundary:
+        # while one is active EdgeLink keeps serving its provisioning API on that
+        # subnet, but never renames, stops, or periodically displaces the AP.
+        if (
+            network.ap_active
+            and network.connection_name
+            in self.config.access_point.reserved_connection_names
+        ):
+            self._ap_restore_pending = False
+            self._ap_observed = True
+            self._transition(AgentState.PROVISIONING, "external_fallback_ap_active")
+            return
+
         if self._ap_restore_pending:
             expected_ssid = access_point_ssid(self.config)
             if network.ap_active and network.ssid == expected_ssid:

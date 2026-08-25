@@ -4,6 +4,7 @@ import json
 import urllib.error
 import urllib.request
 
+from edgelink_agent import __version__
 from edgelink_agent.api import ApiServer
 from edgelink_agent.config import AgentConfig, ApiConfig, OverlayConfig
 from edgelink_agent.controller import EdgeLinkController
@@ -96,7 +97,7 @@ def test_http_status_scan_and_secret_free_failed_connect() -> None:
     try:
         status_code, status = _json_request(f"{base}/v1/status")
         assert status_code == 200
-        assert status["version"] == "0.3.0"
+        assert status["version"] == __version__
         assert "commit" in status["build"]
         assert status["network"]["ssid"] == "Test WiFi"
 

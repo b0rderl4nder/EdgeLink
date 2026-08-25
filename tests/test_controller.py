@@ -288,6 +288,39 @@ def test_foreign_legacy_ap_is_reconciled_to_product_configuration(monkeypatch) -
     assert network.current.ssid == "Zebao-1"
 
 
+def test_reserved_daemon_ap_is_preserved_without_periodic_wifi_writes(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(
+        replace(
+            offline_network(),
+            ap_active=True,
+            connection_name="Hotspot",
+            ssid="reachy-mini-ap-zebao-1",
+        )
+    )
+    product = replace(
+        config(),
+        device_name="zebao-1",
+        access_point=AccessPointConfig(
+            enabled=True,
+            connection_name="edgelink-provisioning",
+            ssid="Zebao-1",
+            reserved_connection_names=("Hotspot",),
+        ),
+    )
+    controller = EdgeLinkController(product, network, FakeOverlay(OverlaySnapshot()), clock)
+
+    first = controller.tick()
+    clock.advance(600)
+    second = controller.tick()
+
+    assert first.state is AgentState.PROVISIONING
+    assert first.reason == "external_fallback_ap_active"
+    assert second.reason == "external_fallback_ap_active"
+    assert network.actions == []
+
+
 def test_overlay_failure_never_starts_ap(monkeypatch) -> None:
     monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
     clock = FakeClock()

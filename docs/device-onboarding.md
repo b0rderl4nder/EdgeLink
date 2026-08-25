@@ -63,11 +63,13 @@ AP密码位于`/etc/edgelink/secrets.env`，不要放入配置仓库。首次安
 2. 找到EasyTier真实进程、systemd unit、配置路径与虚拟地址；禁止在终端输出密钥。
 3. 查明Reachy daemon运行期是否自动触发`setup_hotspot`，以及触发窗口。
 4. 第一阶段只运行preflight和单次状态检查，不启用EdgeLink自动服务。
-5. 选择唯一AP控制者：推荐EdgeLink负责自动回退，Reachy daemon保留显式扫描/连接接口。
-   0号机把`access_point.connection_name`设为`Hotspot`，EdgeLink会接管该连接名，
-   并按产品模板统一SSID、共享地址和已交付的热点密码。
+5. EdgeLink和Reachy daemon必须使用不同的NetworkManager连接名。
+   EdgeLink固定使用`edgelink-provisioning`；Reachy daemon的`Hotspot`保持原样，
+   作为EdgeLink进程失效时仍能独立启动的物理兜底。禁止两个程序修改同一个连接配置。
 6. 备份NetworkManager连接配置、EasyTier配置和当前服务文件。
 7. 灰度启用EdgeLink，先验证EasyTier单独恢复，再做错误Wi‑Fi回滚测试。
+   验收时必须分别启动`edgelink-provisioning`和`Hotspot`，确认两者的
+   SSID、密码与连接UUID互不改写。
 8. 最后进行真实外带：公司Wi‑Fi、手机热点、完全无网三个环境。
 
 ## 发布与回滚

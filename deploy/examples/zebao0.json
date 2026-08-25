@@ -18,11 +18,12 @@
   },
   "access_point": {
     "enabled": true,
-    "connection_name": "Hotspot",
+    "connection_name": "edgelink-provisioning",
     "ssid": "Zebao-0",
     "ssid_prefix": "Zebao",
     "password_env": "EDGELINK_AP_PASSWORD",
-    "ipv4_cidr": "10.42.0.1/24"
+    "ipv4_cidr": "10.42.0.1/24",
+    "reserved_connection_names": ["Hotspot"]
   },
   "health": {
     "dns_name": "api.coze.cn",

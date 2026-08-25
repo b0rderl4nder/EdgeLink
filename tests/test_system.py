@@ -142,7 +142,20 @@ def test_committing_verified_profile_enables_bounded_autoconnect() -> None:
 
 
 def test_restore_activates_exact_previous_connection() -> None:
-    runner = RecordingRunner()
+    class WifiProfileRunner(RecordingRunner):
+        def run(self, args, timeout: float = 10.0) -> CommandResult:
+            call = tuple(args)
+            self.calls.append(call)
+            if call[:4] == (
+                "nmcli",
+                "-g",
+                "connection.type,connection.interface-name",
+                "connection",
+            ):
+                return CommandResult(0, "802-11-wireless\nwlan0\n", "")
+            return CommandResult(0, "", "")
+
+    runner = WifiProfileRunner()
     adapter = NetworkManagerAdapter(
         WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
     )
@@ -173,7 +186,7 @@ class CheckpointRunner(RecordingRunner):
         return CommandResult(0, "()\n")
 
 
-def test_network_manager_checkpoint_has_automatic_rollback_and_delete_new_profiles() -> None:
+def test_network_manager_checkpoint_is_scoped_without_global_profile_deletion() -> None:
     runner = CheckpointRunner()
     adapter = NetworkManagerAdapter(
         WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
@@ -184,9 +197,68 @@ def test_network_manager_checkpoint_has_automatic_rollback_and_delete_new_profil
     assert checkpoint == "/org/freedesktop/NetworkManager/Checkpoint/7"
     create = next(call for call in runner.calls if "CheckpointCreate" in " ".join(call))
     assert "['/org/freedesktop/NetworkManager/Devices/3']" in create
-    assert create[-2:] == ("90", "2")
+    assert create[-2:] == ("90", "0")
     assert adapter.rollback_checkpoint(checkpoint)
     assert adapter.commit_checkpoint(checkpoint)
+
+
+class ExistingProfileRunner(RecordingRunner):
+    def __init__(self, connection_type: str, interface_name: str) -> None:
+        super().__init__()
+        self.connection_type = connection_type
+        self.interface_name = interface_name
+
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        call = tuple(args)
+        self.calls.append(call)
+        if call[:4] == (
+            "nmcli",
+            "-g",
+            "connection.type,connection.interface-name",
+            "connection",
+        ):
+            return CommandResult(
+                0,
+                f"{self.connection_type}\n{self.interface_name}\n",
+                "",
+            )
+        return CommandResult(0, "", "")
+
+
+def test_forget_refuses_wired_and_non_owned_profiles() -> None:
+    wired = ExistingProfileRunner("802-3-ethernet", "eth0")
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=wired
+    )
+
+    assert not adapter.forget("edgelink-wired-profile")
+    assert not adapter.forget("Wired connection 1")
+    assert not any(call[:3] == ("nmcli", "connection", "delete") for call in wired.calls)
+
+
+def test_forget_allows_only_owned_wifi_profile_on_configured_interface() -> None:
+    wifi = ExistingProfileRunner("802-11-wireless", "wlan0")
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=wifi
+    )
+
+    assert adapter.forget("edgelink-0123456789")
+    assert wifi.calls[-1] == (
+        "nmcli",
+        "connection",
+        "delete",
+        "edgelink-0123456789",
+    )
+
+
+def test_restore_refuses_wired_profile_even_when_name_is_supplied() -> None:
+    wired = ExistingProfileRunner("802-3-ethernet", "eth0")
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=wired
+    )
+
+    assert not adapter.restore("Wired connection 1")
+    assert not any(call[:3] == ("nmcli", "--wait", "20") for call in wired.calls)
 
 
 class ActivationFailureRunner(RecordingRunner):
@@ -261,13 +333,14 @@ class HealthRunner(RecordingRunner):
         call = tuple(args)
         self.calls.append(call)
         device_fields = (
-            "GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS"
+            "GENERAL.STATE,GENERAL.CONNECTION,GENERAL.CON-UUID,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS"
         )
         if call[:3] == ("nmcli", "-f", device_fields):
             return CommandResult(
                 0,
                 "GENERAL.STATE: 100 (connected)\n"
                 "GENERAL.CONNECTION: Office\n"
+                "GENERAL.CON-UUID: 12345678-1234-1234-1234-123456789abc\n"
                 "IP4.ADDRESS[1]: 192.168.1.20/24\n"
                 "IP4.GATEWAY: 192.168.1.1\n"
                 "IP4.DNS[1]: 192.168.1.1\n",
@@ -338,3 +411,50 @@ def test_strict_health_policy_can_require_non_dns_internet_evidence(monkeypatch)
     assert not snapshot.uplink_ready
     assert snapshot.health_level == "local"
     assert snapshot.error == "uplink_target_unreachable"
+
+
+class DuplicateHotspotRunner(RecordingRunner):
+    ACTIVE_UUID = "0436d1e1-c4e7-450f-ba01-0d6a5d9522d3"
+
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        call = tuple(args)
+        self.calls.append(call)
+        if call[:2] == ("nmcli", "-f") and "device" in call:
+            return CommandResult(
+                0,
+                "GENERAL.STATE: 100 (connected)\n"
+                "GENERAL.CONNECTION: Hotspot\n"
+                f"GENERAL.CON-UUID: {self.ACTIVE_UUID}\n"
+                "IP4.ADDRESS[1]: 10.42.0.1/24\n"
+                "IP4.GATEWAY: --\n"
+                "IP4.DNS[1]: --\n",
+                "",
+            )
+        if call[:3] == ("nmcli", "-g", "802-11-wireless.mode"):
+            identifier = call[-1]
+            if identifier == self.ACTIVE_UUID:
+                return CommandResult(0, "ap\n", "")
+            return CommandResult(2, "", "ambiguous connection name")
+        if call[:3] == ("nmcli", "networking", "connectivity"):
+            return CommandResult(0, "full\n", "")
+        return CommandResult(0, "", "")
+
+
+def test_snapshot_uses_active_uuid_when_duplicate_hotspot_names_exist() -> None:
+    runner = DuplicateHotspotRunner()
+    adapter = NetworkManagerAdapter(
+        WifiConfig(),
+        AccessPointConfig(
+            connection_name="edgelink-provisioning",
+            reserved_connection_names=("Hotspot",),
+        ),
+        HealthConfig(),
+        runner=runner,
+    )
+
+    snapshot = adapter.snapshot()
+
+    assert snapshot.connection_name == "Hotspot"
+    assert snapshot.ap_active
+    mode_call = next(call for call in runner.calls if "802-11-wireless.mode" in call)
+    assert mode_call[-1] == DuplicateHotspotRunner.ACTIVE_UUID

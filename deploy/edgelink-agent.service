@@ -21,7 +21,9 @@ ProtectSystem=strict
 ProtectControlGroups=true
 ProtectKernelTunables=true
 RestrictSUIDSGID=true
-ReadWritePaths=/run /var/lib/NetworkManager /etc/NetworkManager/system-connections
+# nmcli performs changes through NetworkManager's D-Bus service.  The agent does
+# not need direct filesystem write access to NetworkManager's global profile store.
+ReadWritePaths=/run
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 

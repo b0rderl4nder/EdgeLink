@@ -51,7 +51,8 @@ Controller是唯一自动写入者。dispatcher可能产生延迟或乱序事件
 
 NetworkManager的checkpoint机制是远程改网后自动回滚的官方基线；EdgeLink在不绑定特定D‑Bus客户端库的前提下，保留原连接名并显式验证回滚结果。配网页面遵循成熟门户的“广播—配网—失败后重新广播”流程。
 
-已有产品热点可通过相同的`connection_name`由EdgeLink接管；每次启动前都会按产品模板规范化SSID、AP模式、共享地址和交付密码，避免旧控制器留下不一致参数。
+EdgeLink只管理自己的`edgelink-provisioning`连接。产品daemon的热点配置必须保持独立，
+不允许通过复用`connection_name`的方式“接管”，否则一个组件的错误会同时摧毁主路和兜底。
 
 ## 防抖与安全
 

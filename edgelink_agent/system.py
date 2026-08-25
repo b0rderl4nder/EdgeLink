@@ -98,7 +98,7 @@ class NetworkManagerAdapter:
         result = self._run(
             "nmcli",
             "-f",
-            "GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS",
+            "GENERAL.STATE,GENERAL.CONNECTION,GENERAL.CON-UUID,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS",
             "device",
             "show",
             self._wifi.interface,
@@ -138,6 +138,35 @@ class NetworkManagerAdapter:
         )
         return result.stdout.strip().lower() if result.returncode == 0 else ""
 
+    def _is_wifi_connection(self, connection_name: str) -> bool:
+        """Return true only for profiles that cannot target a non-Wi-Fi device.
+
+        NetworkManager profile names are not a security boundary: callers can pass
+        the name of a wired, bridge, VPN, or product-daemon profile.  Every method
+        that accepts an existing profile must therefore verify its type and device
+        binding before asking NetworkManager to mutate or activate it.
+        """
+        if not connection_name:
+            return False
+        result = self._run(
+            "nmcli",
+            "-g",
+            "connection.type,connection.interface-name",
+            "connection",
+            "show",
+            connection_name,
+        )
+        if result.returncode:
+            return False
+        values = result.stdout.splitlines()
+        connection_type = values[0].strip().lower() if values else ""
+        interface_name = values[1].strip() if len(values) > 1 else ""
+        return connection_type in {"802-11-wireless", "wifi"} and interface_name in {
+            "",
+            "--",
+            self._wifi.interface,
+        }
+
     def snapshot(self) -> NetworkSnapshot:
         now = time.time()
         fields = self._device_fields()
@@ -149,7 +178,12 @@ class NetworkManagerAdapter:
             )
         state = " ".join(fields.get("GENERAL.STATE", []))
         connection = _first(fields.get("GENERAL.CONNECTION"))
-        connection_mode = self._connection_mode(connection)
+        # Profile names are not unique in NetworkManager.  Product daemons and
+        # older installers can legitimately leave two profiles named "Hotspot";
+        # querying by name then fails as ambiguous and makes an active AP look
+        # disconnected.  The active UUID is authoritative and unambiguous.
+        connection_uuid = _first(fields.get("GENERAL.CON-UUID"))
+        connection_mode = self._connection_mode(connection_uuid or connection)
         addresses = _clean_values([
             value
             for key, values in fields.items()
@@ -238,7 +272,10 @@ class NetworkManagerAdapter:
             "--dest", "org.freedesktop.NetworkManager",
             "--object-path", "/org/freedesktop/NetworkManager",
             "--method", "org.freedesktop.NetworkManager.CheckpointCreate",
-            f"['{device_path}']", str(timeout_seconds), "2",
+            # Scope rollback to wlan0 only.  DELETE_NEW_CONNECTIONS (flag 2) is
+            # deliberately not used because it can delete profiles created for
+            # unrelated devices while a provisioning transaction is in flight.
+            f"['{device_path}']", str(timeout_seconds), "0",
             timeout=8.0,
         )
         if result.returncode:
@@ -410,7 +447,15 @@ class NetworkManagerAdapter:
         return result.returncode == 0
 
     def forget(self, connection_name: str) -> bool:
-        if not connection_name or connection_name == self._ap.connection_name:
+        # EdgeLink owns only the deterministic profiles it creates.  Never accept
+        # an arbitrary NetworkManager profile name: in particular, deleting a
+        # wired profile can strand a headless device even though this adapter is
+        # configured for wlan0.
+        if (
+            not connection_name.startswith("edgelink-")
+            or connection_name == self._ap.connection_name
+            or not self._is_wifi_connection(connection_name)
+        ):
             return False
         return self._run("nmcli", "connection", "delete", connection_name).returncode == 0
 
@@ -428,7 +473,11 @@ class NetworkManagerAdapter:
         return result.returncode == 0
 
     def restore(self, connection_name: str) -> bool:
-        if not connection_name or connection_name == self._ap.connection_name:
+        if (
+            not connection_name
+            or connection_name == self._ap.connection_name
+            or not self._is_wifi_connection(connection_name)
+        ):
             return False
         result = self._run(
             "nmcli",

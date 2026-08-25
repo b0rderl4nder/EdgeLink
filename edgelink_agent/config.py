@@ -34,6 +34,7 @@ class AccessPointConfig:
     ssid_prefix: str = "EdgeLink"
     password_env: str = "EDGELINK_AP_PASSWORD"
     ipv4_cidr: str = "10.42.0.1/24"
+    reserved_connection_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,11 @@ def load_config(path: str | os.PathLike[str]) -> AgentConfig:
     if "reconnect_settle_seconds" not in wifi and legacy_stable_seconds is not None:
         wifi["reconnect_settle_seconds"] = legacy_stable_seconds
     ap.pop("reuse_existing_profile", None)
+    if "reserved_connection_names" in ap:
+        value = ap["reserved_connection_names"]
+        ap["reserved_connection_names"] = tuple(
+            str(item) for item in value
+        ) if isinstance(value, list) else ()
     health = _mapping(raw.get("health"))
     overlay = _mapping(raw.get("overlay"))
     api = _mapping(raw.get("api"))
@@ -214,6 +220,8 @@ def _validate_config(config: AgentConfig) -> None:
         raise ValueError("invalid access point IPv4 CIDR") from exc
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config.access_point.password_env):
         raise ValueError("invalid access point password environment variable")
+    if config.access_point.connection_name in config.access_point.reserved_connection_names:
+        raise ValueError("access point connection name is reserved by another controller")
     for subnet in config.api.trusted_mutation_subnets:
         try:
             ipaddress.ip_network(subnet)
