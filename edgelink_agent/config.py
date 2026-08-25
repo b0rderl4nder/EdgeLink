@@ -78,7 +78,10 @@ class ApiConfig:
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
     device_name: str = "edge-device"
-    tick_seconds: float = 2.0
+    # NetworkManager dispatcher events wake the controller immediately.  A slower
+    # periodic audit avoids continuously spawning nmcli/DNS/overlay probes on small
+    # edge CPUs without delaying real link changes.
+    tick_seconds: float = 5.0
     wifi: WifiConfig = field(default_factory=WifiConfig)
     access_point: AccessPointConfig = field(default_factory=AccessPointConfig)
     health: HealthConfig = field(default_factory=HealthConfig)

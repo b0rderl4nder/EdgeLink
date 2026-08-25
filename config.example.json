@@ -1,6 +1,6 @@
 {
   "device_name": "edge-device",
-  "tick_seconds": 2,
+  "tick_seconds": 5,
   "wifi": {
     "interface": "wlan0",
     "startup_grace_seconds": 45,
