@@ -109,6 +109,28 @@ def run_preflight(config: AgentConfig, runner: CommandRunner | None = None) -> l
         ("systemctl", "is-active", "reachy-mini-daemon.service"), timeout=5.0
     )
     if reachy.returncode == 0 and reachy.stdout.strip() == "active":
+        # A product daemon may own a physical fallback AP.  Refuse a first
+        # EdgeLink activation unless the operator has explicitly declared a
+        # different reserved profile name; otherwise a harmless-looking
+        # update can silently turn into two controllers writing one hotspot.
+        reserved_names = tuple(
+            name.strip()
+            for name in config.access_point.reserved_connection_names
+            if name.strip()
+        )
+        boundary_declared = bool(reserved_names) and (
+            config.access_point.connection_name not in reserved_names
+        )
+        checks.append(
+            Check(
+                "daemon_ap_boundary",
+                boundary_declared,
+                "error",
+                "已声明daemon保留热点，EdgeLink将使用独立AP配置"
+                if boundary_declared
+                else "检测到Reachy daemon，但未声明其保留热点；拒绝启用EdgeLink自动AP",
+            )
+        )
         checks.append(
             Check(
                 "existing_network_controller",

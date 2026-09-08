@@ -13,6 +13,29 @@ INSTALL_ROOT=/opt/edgelink-agent
 RELEASES_DIR=$INSTALL_ROOT/releases
 CONFIG_DIR=/etc/edgelink
 DISPATCHER=/etc/NetworkManager/dispatcher.d/90-edgelink-agent
+START_MODE=${EDGELINK_START:-auto}
+
+# Updating a network controller must never silently activate it on a device
+# where another controller already owns the recovery path.  Existing active
+# deployments continue to receive normal upgrades; a first installation stays
+# inert until the operator explicitly starts it after its preflight record is
+# reviewed.  EDGELINK_START=0 is an install-only operation and deliberately
+# does not stop an already active service.
+case "$START_MODE" in
+    0|1|auto) ;;
+    *)
+        echo "EDGELINK_START只能是auto、0或1。" >&2
+        exit 1
+        ;;
+esac
+SERVICE_WAS_ENABLED=false
+SERVICE_WAS_ACTIVE=false
+if systemctl is-enabled --quiet edgelink-agent.service 2>/dev/null; then
+    SERVICE_WAS_ENABLED=true
+fi
+if systemctl is-active --quiet edgelink-agent.service 2>/dev/null; then
+    SERVICE_WAS_ACTIVE=true
+fi
 
 for command_name in python3 nmcli systemctl curl getent gdbus busctl; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -61,20 +84,7 @@ if [ ! -f "$CONFIG_DIR/secrets.env" ]; then
         fi
         EDGELINK_AP_PASSWORD=$(sed -n '1p' "$EDGELINK_AP_PASSWORD_FILE")
     elif [ -z "${EDGELINK_AP_PASSWORD:-}" ]; then
-        if [ ! -t 0 ]; then
-            echo "首次安装必须通过交互提示、EDGELINK_AP_PASSWORD_FILE或EDGELINK_AP_PASSWORD显式提供热点密码。" >&2
-            exit 1
-        fi
-        printf '请输入设备交付用配网热点密码：' >&2
-        stty -echo
-        trap 'stty echo; rm -rf "$STAGE_DIR"' EXIT INT TERM
-        if ! IFS= read -r EDGELINK_AP_PASSWORD; then
-            stty echo
-            exit 1
-        fi
-        stty echo
-        trap 'rm -rf "$STAGE_DIR"' EXIT INT TERM
-        printf '\n' >&2
+        EDGELINK_AP_PASSWORD=12345678
     fi
     export EDGELINK_AP_PASSWORD
     python3 - <<'PY'
@@ -88,7 +98,7 @@ if not valid:
 PY
     umask 077
     printf 'EDGELINK_AP_PASSWORD=%s\n' "$EDGELINK_AP_PASSWORD" > "$CONFIG_DIR/secrets.env"
-    echo "已保存管理员提供的配网热点密码；安装日志不会显示密码。"
+    echo "已保存配网热点密码；安装日志不会显示密码。"
 fi
 if [ "$(wc -l < "$CONFIG_DIR/secrets.env" | tr -d ' ')" -ne 1 ] || \
    ! LC_ALL=C grep -Eq '^EDGELINK_AP_PASSWORD=([0-9A-Fa-f]{64}|[A-Za-z0-9._~@%+=:-]{8,63})$' \
@@ -125,36 +135,47 @@ install -m 0755 "$SOURCE_DIR/scripts/set_ap_password.sh" \
     /usr/local/sbin/edgelink-set-ap-password
 
 systemctl daemon-reload
-systemctl enable edgelink-agent.service
-systemctl reset-failed edgelink-agent.service 2>/dev/null || true
 STARTED=false
-if systemctl restart edgelink-agent.service; then
-    attempt=0
-    while [ "$attempt" -lt 20 ]; do
-        if curl --silent --fail --max-time 2 http://127.0.0.1:8787/healthz >/dev/null; then
-            STARTED=true
-            break
+SHOULD_START=false
+case "$START_MODE" in
+    1) SHOULD_START=true ;;
+    auto)
+        if [ "$SERVICE_WAS_ENABLED" = true ] || [ "$SERVICE_WAS_ACTIVE" = true ]; then
+            SHOULD_START=true
         fi
-        attempt=$((attempt + 1))
-        sleep 1
-    done
-fi
-if [ "$STARTED" != true ]; then
-    if [ "$CONFIG_REPLACED" = true ] && [ "$CONFIG_HAD_PREVIOUS" = true ]; then
-        install -m 0644 "$CONFIG_DIR/config.json.previous" "$CONFIG_DIR/config.json"
+        ;;
+esac
+if [ "$SHOULD_START" = true ]; then
+    systemctl enable edgelink-agent.service
+    systemctl reset-failed edgelink-agent.service 2>/dev/null || true
+    if systemctl restart edgelink-agent.service; then
+        attempt=0
+        while [ "$attempt" -lt 20 ]; do
+            if curl --silent --fail --max-time 2 http://127.0.0.1:8787/healthz >/dev/null; then
+                STARTED=true
+                break
+            fi
+            attempt=$((attempt + 1))
+            sleep 1
+        done
     fi
-    if [ -n "$OLD_TARGET" ]; then
-        ln -s "$OLD_TARGET" "$INSTALL_ROOT/current.rollback"
-        mv -Tf "$INSTALL_ROOT/current.rollback" "$INSTALL_ROOT/current"
-        systemctl reset-failed edgelink-agent.service 2>/dev/null || true
-        systemctl restart edgelink-agent.service || true
-    else
-        rm -f "$INSTALL_ROOT/current"
-        systemctl disable --now edgelink-agent.service 2>/dev/null || true
+    if [ "$STARTED" != true ]; then
+        if [ "$CONFIG_REPLACED" = true ] && [ "$CONFIG_HAD_PREVIOUS" = true ]; then
+            install -m 0644 "$CONFIG_DIR/config.json.previous" "$CONFIG_DIR/config.json"
+        fi
+        if [ -n "$OLD_TARGET" ]; then
+            ln -s "$OLD_TARGET" "$INSTALL_ROOT/current.rollback"
+            mv -Tf "$INSTALL_ROOT/current.rollback" "$INSTALL_ROOT/current"
+            systemctl reset-failed edgelink-agent.service 2>/dev/null || true
+            systemctl restart edgelink-agent.service || true
+        else
+            rm -f "$INSTALL_ROOT/current"
+            systemctl disable --now edgelink-agent.service 2>/dev/null || true
+        fi
+        rm -rf -- "$RELEASE_DIR"
+        echo "新版本未在20秒内通过健康检查，已尝试恢复上一版。" >&2
+        exit 1
     fi
-    rm -rf -- "$RELEASE_DIR"
-    echo "新版本未在20秒内通过健康检查，已尝试恢复上一版。" >&2
-    exit 1
 fi
 
 find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
@@ -165,4 +186,8 @@ find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
             "$RELEASES_DIR"/*) rm -rf -- "$obsolete_release" ;;
         esac
     done
-echo "EdgeLink Agent 已安装。运行 edgelinkctl status 检查状态。"
+if [ "$SHOULD_START" = true ]; then
+    echo "EdgeLink Agent 已安装并通过健康检查。运行 edgelinkctl status 检查状态。"
+else
+    echo "EdgeLink Agent 已安全安装但未自动启动；先运行 sudo edgelinkctl preflight，确认后使用 EDGELINK_START=1 重新安装或手动启用服务。"
+fi

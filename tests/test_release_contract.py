@@ -14,13 +14,24 @@ def test_package_and_runtime_versions_match() -> None:
     assert metadata["project"]["version"] == __version__
 
 
-def test_installer_never_creates_an_unknown_random_ap_password() -> None:
+def test_installer_uses_known_default_and_never_creates_random_ap_password() -> None:
     installer = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
 
     assert "secrets.token_urlsafe" not in installer
-    assert "请输入设备交付用配网热点密码" in installer
+    assert "EDGELINK_AP_PASSWORD=12345678" in installer
     assert "EDGELINK_AP_PASSWORD_FILE" in installer
     assert "EDGELINK_AP_PASSWORD=%s" in installer
+
+
+def test_first_install_never_silently_activates_a_network_controller() -> None:
+    installer = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+    assert "START_MODE=${EDGELINK_START:-auto}" in installer
+    assert '0|1|auto)' in installer
+    assert "SERVICE_WAS_ENABLED=false" in installer
+    assert "SERVICE_WAS_ACTIVE=false" in installer
+    assert 'if [ "$SHOULD_START" = true ]; then' in installer
+    assert "EDGELINK_START=1" in installer
 
 
 def test_public_portal_cannot_stop_its_own_access_point() -> None:

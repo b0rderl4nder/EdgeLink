@@ -1,5 +1,13 @@
 # 变更记录
 
+## 0.3.4 — 2026-08-29
+
+- 将稳定联网期的周期巡检从5秒收敛为15秒，避免`nmcli`、DNS与EasyTier CLI频繁短时占满边缘设备CPU；NetworkManager网络变化事件仍会立即唤醒恢复状态机，不增加真实断网恢复等待。
+- 安装器改为安全激活策略：首次安装仅写入独立release并执行预检，默认不自动启用网络控制器；
+  已运行设备仍会按原状态升级，显式`EDGELINK_START=1`才启动新设备。
+- Reachy daemon运行时，预检必须看到明确的保留热点边界；未声明`reserved_connection_names`
+  时拒绝启用自动AP，防止再次让EdgeLink写入daemon的`Hotspot`配置。
+
 ## 0.3.3 — 2026-08-25
 
 - 常规网络巡检由2秒调整为5秒，NetworkManager事件仍即时唤醒；减少树莓派上`nmcli`、DNS和EasyTier探测进程开销，不牺牲真实链路变化响应。

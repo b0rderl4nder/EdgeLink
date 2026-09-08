@@ -42,7 +42,7 @@ edgelinkctl status
 sudo env EDGELINK_CONFIG_SOURCE=deploy/examples/zebao0.json ./scripts/install.sh
 ```
 
-首次安装会在终端安全提示管理员输入AP密码，程序不再生成管理员无法获知的随机值。自动化交付应通过权限受限的`EDGELINK_AP_PASSWORD_FILE`提供。密码仅保存在`/etc/edgelink/secrets.env`，权限为`0600`，不进入配置仓库、命令行和安装日志；已安装设备升级时继续使用原密码。正式启用前应核对设备名、无线接口、EasyTier unit和健康探测目标。
+首次安装在未提供密码时使用公开的初始配网密码`12345678`，不再生成管理员无法获知的随机值。正式交付可通过权限受限的`EDGELINK_AP_PASSWORD_FILE`覆盖，并应在首次联网后使用`sudo edgelink-set-ap-password`轮换。实际密码仅保存在`/etc/edgelink/secrets.env`，权限为`0600`，不进入安装日志；已安装设备升级时继续使用原密码。首次安装默认只完成release和预检，不自动启动网络控制器；确认daemon热点、无线接口、EasyTier unit和健康探测目标后，使用`EDGELINK_START=1 sudo ./scripts/install.sh`显式启用。已运行设备升级时会保持原有启用状态。
 
 ## 手机配网
 
