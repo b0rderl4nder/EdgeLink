@@ -30,7 +30,12 @@
     "dns_timeout_seconds": 2,
     "target_policy": "any",
     "minimum_connectivity": "internet",
-    "accept_dns_as_internet_evidence": true,
+    "accept_dns_as_internet_evidence": false,
+    "https_probe_hosts": ["www.aliyun.com", "www.qq.com"],
+    "https_probe_timeout_seconds": 2,
+    "portal_probe_host": "connectivitycheck.gstatic.cn",
+    "portal_probe_path": "/generate_204",
+    "portal_probe_timeout_seconds": 2,
     "targets": [
       {
         "name": "aliyun_dns",

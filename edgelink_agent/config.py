@@ -17,6 +17,7 @@ class WifiConfig:
     reconnect_settle_seconds: float = 12.0
     reconnect_attempts_before_ap: int = 3
     ap_fallback_seconds: float = 60.0
+    portal_fallback_seconds: float = 0.0
     recovery_cooldown_seconds: float = 120.0
     ap_restore_retry_seconds: float = 3.0
     provisioning_start_delay_seconds: float = 1.0
@@ -52,7 +53,13 @@ class HealthConfig:
     dns_timeout_seconds: float = 2.0
     target_policy: str = "any"
     minimum_connectivity: str = "internet"
-    accept_dns_as_internet_evidence: bool = True
+    # Kept for old configuration files; DNS alone is never Internet proof.
+    accept_dns_as_internet_evidence: bool = False
+    https_probe_hosts: tuple[str, ...] = ("www.aliyun.com", "www.qq.com")
+    https_probe_timeout_seconds: float = 2.0
+    portal_probe_host: str = "connectivitycheck.gstatic.cn"
+    portal_probe_path: str = "/generate_204"
+    portal_probe_timeout_seconds: float = 2.0
     targets: tuple[ProbeTarget, ...] = (
         ProbeTarget(name="dns_https", host="1.1.1.1", port=443),
     )
@@ -139,6 +146,11 @@ def load_config(path: str | os.PathLike[str]) -> AgentConfig:
             str(item) for item in value
         ) if isinstance(value, list) else ()
     health = _mapping(raw.get("health"))
+    if "https_probe_hosts" in health:
+        value = health["https_probe_hosts"]
+        health["https_probe_hosts"] = (
+            tuple(str(item) for item in value) if isinstance(value, list) else ()
+        )
     overlay = _mapping(raw.get("overlay"))
     api = _mapping(raw.get("api"))
     defaults = AgentConfig()
@@ -160,6 +172,27 @@ def load_config(path: str | os.PathLike[str]) -> AgentConfig:
                 health.get(
                     "accept_dns_as_internet_evidence",
                     defaults.health.accept_dns_as_internet_evidence,
+                )
+            ),
+            https_probe_hosts=health.get(
+                "https_probe_hosts", defaults.health.https_probe_hosts
+            ),
+            https_probe_timeout_seconds=float(
+                health.get(
+                    "https_probe_timeout_seconds",
+                    defaults.health.https_probe_timeout_seconds,
+                )
+            ),
+            portal_probe_host=str(
+                health.get("portal_probe_host", defaults.health.portal_probe_host)
+            ),
+            portal_probe_path=str(
+                health.get("portal_probe_path", defaults.health.portal_probe_path)
+            ),
+            portal_probe_timeout_seconds=float(
+                health.get(
+                    "portal_probe_timeout_seconds",
+                    defaults.health.portal_probe_timeout_seconds,
                 )
             ),
             targets=_targets(health.get("targets")),
@@ -200,6 +233,8 @@ def _validate_config(config: AgentConfig) -> None:
     invalid = [name for name, value in positive_wifi_values.items() if value <= 0]
     if invalid:
         raise ValueError(f"invalid positive Wi-Fi settings: {', '.join(invalid)}")
+    if config.wifi.portal_fallback_seconds < 0:
+        raise ValueError("wifi.portal_fallback_seconds must be nonnegative")
     if not 0 <= config.wifi.reconnect_attempts_before_ap <= 100:
         raise ValueError("reconnect_attempts_before_ap must be between 0 and 100")
     if config.tick_seconds <= 0:
@@ -212,6 +247,17 @@ def _validate_config(config: AgentConfig) -> None:
         raise ValueError("health.minimum_connectivity must be 'local' or 'internet'")
     if config.health.dns_timeout_seconds <= 0:
         raise ValueError("health.dns_timeout_seconds must be positive")
+    if config.health.https_probe_timeout_seconds <= 0:
+        raise ValueError("health.https_probe_timeout_seconds must be positive")
+    if config.health.portal_probe_timeout_seconds <= 0:
+        raise ValueError("health.portal_probe_timeout_seconds must be positive")
+    if config.health.minimum_connectivity == "internet" and not config.health.https_probe_hosts:
+        raise ValueError("health.https_probe_hosts must not be empty in internet mode")
+    for host in (*config.health.https_probe_hosts, config.health.portal_probe_host):
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", host):
+            raise ValueError("invalid health probe host")
+    if not re.fullmatch(r"/[A-Za-z0-9._~/%-]{1,200}", config.health.portal_probe_path):
+        raise ValueError("invalid health portal probe path")
     for target in config.health.targets:
         if not 1 <= target.port <= 65535 or target.timeout_seconds <= 0:
             raise ValueError(f"invalid health target: {target.name}")

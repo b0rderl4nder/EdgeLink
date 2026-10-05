@@ -75,3 +75,29 @@ def test_config_rejects_ap_profile_owned_by_another_controller(tmp_path) -> None
 
     with pytest.raises(ValueError, match="reserved by another controller"):
         load_config(path)
+
+
+def test_internet_mode_requires_https_probe_hosts(tmp_path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"health": {"https_probe_hosts": []}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="https_probe_hosts"):
+        load_config(path)
+
+
+def test_portal_probe_path_rejects_http_header_injection(tmp_path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"health": {"portal_probe_path": "/generate_204\r\nHost: bad"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="portal probe path"):
+        load_config(path)
+
+
+def test_portal_fallback_delay_must_not_be_negative(tmp_path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"wifi": {"portal_fallback_seconds": -1}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="portal_fallback_seconds"):
+        load_config(path)

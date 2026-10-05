@@ -61,7 +61,10 @@ class FakeNetwork:
     def scan(self) -> list[WifiNetwork]:
         return []
 
-    def reconnect_saved(self) -> bool:
+    def reconnect_saved(self, excluded_ssids: frozenset[str] = frozenset()) -> bool:
+        if self.connected_snapshot is not None and self.connected_snapshot.ssid in excluded_ssids:
+            self.actions.append("reconnect_excluded")
+            return False
         self.actions.append("reconnect")
         if self.reconnect_result and self.connected_snapshot is not None:
             self.current = self.connected_snapshot
@@ -175,6 +178,20 @@ def offline_network() -> NetworkSnapshot:
     return NetworkSnapshot(interface="wlan0")
 
 
+def captive_network() -> NetworkSnapshot:
+    return replace(
+        healthy_network(),
+        connection_name="LZWC",
+        ssid="LZWC",
+        target_reachable=True,
+        dns_reachable=True,
+        https_reachable=False,
+        connectivity_state="portal",
+        captive_portal=True,
+        validation_passed=False,
+    )
+
+
 def config() -> AgentConfig:
     return AgentConfig(
         device_name="zebao-0",
@@ -223,6 +240,45 @@ def test_offline_retries_then_starts_fallback_ap(monkeypatch) -> None:
     assert status.state is AgentState.PROVISIONING
     assert sum(action == "reconnect" for action in network.actions) == 2
     assert any(action.startswith("start_ap:EdgeLink-zebao-0") for action in network.actions)
+
+
+def test_captive_wifi_returns_to_ap_without_retrying_and_keeps_ap_stable(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(captive_network())
+    network.reconnect_result = True
+    network.connected_snapshot = captive_network()
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+
+    assert controller.tick().reason == "fallback_ap_started"
+    assert network.current.ap_active
+    assert network.actions == ["start_ap:EdgeLink-zebao-0"]
+    clock.advance(600)
+    assert controller.tick().state is AgentState.PROVISIONING
+    assert network.current.ap_active
+    assert not any(action == "reconnect" for action in network.actions)
+
+
+def test_unverified_https_wifi_uses_normal_grace_then_quarantines_from_ap_retry(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    unverified = replace(captive_network(), captive_portal=False, connectivity_state="unknown")
+    network = FakeNetwork(unverified)
+    network.reconnect_result = True
+    network.connected_snapshot = unverified
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+
+    controller.tick()
+    clock.advance(10)
+    assert controller.tick().reason == "fallback_ap_started"
+    clock.advance(600)
+    controller.tick()
+    assert network.current.ap_active
+    assert network.actions[-1] == "reconnect_excluded"
+    assert not controller.recover_now()  # Explicit retry is still allowed.
+    assert network.actions[-1] == "reconnect"
 
 
 def test_successful_reconnect_is_observed_as_healthy_before_ap_fallback(monkeypatch) -> None:
@@ -460,6 +516,23 @@ def test_failed_provisioning_restores_ap(monkeypatch) -> None:
         "suspend:New WiFi",
         "start_ap:EdgeLink-zebao-0",
     ]
+
+
+def test_provisioning_to_captive_wifi_fails_fast_and_restores_ap(monkeypatch) -> None:
+    monkeypatch.setenv("EDGELINK_AP_PASSWORD", "safe-password")
+    clock = FakeClock()
+    network = FakeNetwork(replace(offline_network(), ap_active=True))
+    network.connect_result = True
+    network.connected_snapshot = captive_network()
+    controller = EdgeLinkController(config(), network, FakeOverlay(OverlaySnapshot()), clock)
+    controller.tick()
+
+    assert controller.provision_wifi("LZWC", "12345678") == (False, "captive_portal")
+    assert clock.monotonic() == 1000.0
+    assert network.actions == [
+        "stop_ap", "connect:LZWC", "suspend:LZWC", "start_ap:EdgeLink-zebao-0"
+    ]
+    assert network.current.ap_active
 
 
 def test_failed_provisioning_retries_ap_restore_without_long_cooldown(monkeypatch) -> None:

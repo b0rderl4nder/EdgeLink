@@ -72,6 +72,10 @@ class EdgeLinkController:
         self._ap_observed = False
         self._ap_restore_pending = False
         self._reconnects_in_outage = 0
+        # A fully addressed but unverified Wi-Fi must not repeatedly steal the
+        # single radio from the recovery AP. An explicit retry/provision can
+        # still test it again; no NetworkManager profile is changed here.
+        self._unverified_ssids: set[str] = set()
         self._lock = threading.RLock()
         self._status_view_lock = threading.Lock()
         self._command_lock = threading.Lock()
@@ -132,6 +136,7 @@ class EdgeLinkController:
             self._status.overlay = overlay
             self._status.counters.ticks += 1
             if network.uplink_ready and not network.ap_active:
+                self._unverified_ssids.discard(network.ssid)
                 self._handle_healthy_uplink(now, overlay.running, overlay.connected)
             else:
                 self._handle_unhealthy_uplink(now, network)
@@ -180,6 +185,8 @@ class EdgeLinkController:
         if self._bad_since is None:
             self._bad_since = now
         outage_seconds = now - self._bad_since
+        if network.has_addressing and network.ssid and not network.ap_active:
+            self._unverified_ssids.add(network.ssid)
 
         # A product daemon may intentionally own an independent recovery AP on
         # the same radio.  Reserved profiles are a cooperative hand-off boundary:
@@ -264,14 +271,19 @@ class EdgeLinkController:
             self._transition(AgentState.RECOVERING, "uplink_settling")
             return
 
-        grace = max(
-            self.config.wifi.startup_grace_seconds
-            if now - self._boot_at < self.config.wifi.startup_grace_seconds
-            else 0.0,
-            self.config.wifi.ap_fallback_seconds,
+        grace = (
+            self.config.wifi.portal_fallback_seconds
+            if network.captive_portal
+            else max(
+                self.config.wifi.startup_grace_seconds
+                if now - self._boot_at < self.config.wifi.startup_grace_seconds
+                else 0.0,
+                self.config.wifi.ap_fallback_seconds,
+            )
         )
         can_reconnect = (
-            self.config.wifi.auto_retry_saved_profiles
+            not network.captive_portal
+            and self.config.wifi.auto_retry_saved_profiles
             and self._reconnects_in_outage < self.config.wifi.reconnect_attempts_before_ap
             and now - self._last_reconnect_at >= self.config.wifi.reconnect_interval_seconds
         )
@@ -282,7 +294,7 @@ class EdgeLinkController:
             self._transition(AgentState.RECOVERING, "retrying_saved_wifi")
             if self._attempt_saved_reconnect_locked():
                 self._uplink_settle_until = now + self.config.wifi.reconnect_settle_seconds
-            return
+                return
 
         if outage_seconds >= grace and self.config.access_point.enabled:
             if now - self._last_ap_action_at >= self.config.wifi.recovery_cooldown_seconds:
@@ -439,6 +451,7 @@ class EdgeLinkController:
                         self._status.counters.checkpoints_committed += 1
                     self._active_checkpoint = ""
                     self._status.counters.provisioning_successes += 1
+                    self._unverified_ssids.discard(ssid)
                     self._ap_restore_pending = False
                     self._bad_since = None
                     self._good_since = self._clock.monotonic()
@@ -449,6 +462,8 @@ class EdgeLinkController:
                 failure_reason = "profile_commit_failed"
         elif attempt.ok and verified is not None:
             failure_reason = _network_reason(verified)
+            if verified.has_addressing and verified.ssid:
+                self._unverified_ssids.add(verified.ssid)
         else:
             failure_reason = attempt.reason or "connection_failed"
 
@@ -559,7 +574,7 @@ class EdgeLinkController:
         with self._lock:
             self._last_reconnect_at = self._clock.monotonic()
             self._status.counters.reconnect_attempts += 1
-            result = self._attempt_saved_reconnect_locked()
+            result = self._attempt_saved_reconnect_locked(include_unverified=True)
             if result:
                 self._uplink_settle_until = (
                     self._clock.monotonic() + self.config.wifi.reconnect_settle_seconds
@@ -568,7 +583,7 @@ class EdgeLinkController:
             self._publish_status_locked()
             return result
 
-    def _attempt_saved_reconnect_locked(self) -> bool:
+    def _attempt_saved_reconnect_locked(self, *, include_unverified: bool = False) -> bool:
         """Switch to a saved uplink without ever stranding the current AP.
 
         NetworkManager's checkpoint is scoped to the Wi-Fi device, so Ethernet and
@@ -585,7 +600,8 @@ class EdgeLinkController:
         else:
             self._status.counters.checkpoint_fallbacks += 1
         try:
-            reconnected = self._network.reconnect_saved()
+            excluded = frozenset() if include_unverified else frozenset(self._unverified_ssids)
+            reconnected = self._network.reconnect_saved(excluded)
             verified = self._wait_for_valid_uplink_locked() if reconnected else None
         except Exception:
             if checkpoint and self._network.rollback_checkpoint(checkpoint):
@@ -603,11 +619,14 @@ class EdgeLinkController:
             and not verified.ap_active
             and (not checkpoint or self._network.commit_checkpoint(checkpoint))
         ):
+            self._unverified_ssids.discard(verified.ssid)
             if checkpoint:
                 self._status.counters.checkpoints_committed += 1
             self._active_checkpoint = ""
             return True
 
+        if verified is not None and verified.has_addressing and verified.ssid:
+            self._unverified_ssids.add(verified.ssid)
         if checkpoint and self._network.rollback_checkpoint(checkpoint):
             self._status.counters.checkpoints_rolled_back += 1
         elif checkpoint:
@@ -631,6 +650,7 @@ class EdgeLinkController:
         snapshot = self._network.snapshot()
         while (
             (not snapshot.uplink_ready or snapshot.ap_active)
+            and not snapshot.captive_portal
             and self._clock.monotonic() < deadline
         ):
             remaining = deadline - self._clock.monotonic()

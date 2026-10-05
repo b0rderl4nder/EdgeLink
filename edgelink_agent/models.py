@@ -42,6 +42,7 @@ class NetworkSnapshot:
     dns_servers: tuple[str, ...] = ()
     dns_reachable: bool = False
     target_reachable: bool = False
+    https_reachable: bool = False
     connectivity_state: str = "unknown"
     health_level: str = "disconnected"
     validation_passed: bool | None = None

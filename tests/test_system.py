@@ -190,6 +190,17 @@ def test_reconnect_saved_without_visible_infrastructure_keeps_ap_untouched() -> 
     assert not any("disconnect" in call for call in runner.calls)
 
 
+def test_excluded_unverified_wifi_cannot_steal_recovery_ap() -> None:
+    runner = SavedReconnectRunner()
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=runner
+    )
+
+    assert not adapter.reconnect_saved(frozenset({"LZWC"}))
+    assert not any("disconnect" in call for call in runner.calls)
+    assert not any(call[:4] == ("nmcli", "--wait", "20", "connection") for call in runner.calls)
+
+
 def test_suspending_failed_profile_prevents_it_from_stealing_ap() -> None:
     runner = RecordingRunner()
     adapter = NetworkManagerAdapter(
@@ -440,8 +451,11 @@ class SocketConnection:
         return None
 
 
-def test_target_probe_is_independent_of_dns_probe(monkeypatch) -> None:
+def test_target_probe_is_diagnostic_without_verified_https(monkeypatch) -> None:
     monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: SocketConnection())
+    monkeypatch.setattr(
+        ConnectivityProbe, "verified_https_available", lambda self, interface: False
+    )
     adapter = NetworkManagerAdapter(
         WifiConfig(), AccessPointConfig(), HealthConfig(), runner=HealthRunner(False)
     )
@@ -450,16 +464,19 @@ def test_target_probe_is_independent_of_dns_probe(monkeypatch) -> None:
 
     assert not snapshot.dns_reachable
     assert snapshot.target_reachable
-    assert snapshot.health_level == "internet"
-    assert snapshot.uplink_ready
-    assert snapshot.error == "dns_degraded"
+    assert snapshot.health_level == "local"
+    assert not snapshot.uplink_ready
+    assert snapshot.error == "https_verification_failed"
 
 
-def test_dns_can_be_one_of_several_independent_internet_signals(monkeypatch) -> None:
+def test_dns_alone_cannot_validate_a_captive_network(monkeypatch) -> None:
     def unreachable(*args, **kwargs):
         raise OSError("blocked target")
 
     monkeypatch.setattr("socket.create_connection", unreachable)
+    monkeypatch.setattr(
+        ConnectivityProbe, "verified_https_available", lambda self, interface: False
+    )
     adapter = NetworkManagerAdapter(
         WifiConfig(), AccessPointConfig(), HealthConfig(), runner=HealthRunner(True)
     )
@@ -468,8 +485,9 @@ def test_dns_can_be_one_of_several_independent_internet_signals(monkeypatch) -> 
 
     assert snapshot.dns_reachable
     assert not snapshot.target_reachable
-    assert snapshot.uplink_ready
-    assert snapshot.health_level == "internet"
+    assert not snapshot.uplink_ready
+    assert snapshot.health_level == "local"
+    assert snapshot.error == "https_verification_failed"
 
 
 def test_strict_health_policy_can_require_non_dns_internet_evidence(monkeypatch) -> None:
@@ -477,6 +495,9 @@ def test_strict_health_policy_can_require_non_dns_internet_evidence(monkeypatch)
         raise OSError("blocked target")
 
     monkeypatch.setattr("socket.create_connection", unreachable)
+    monkeypatch.setattr(
+        ConnectivityProbe, "verified_https_available", lambda self, interface: False
+    )
     health = HealthConfig(accept_dns_as_internet_evidence=False)
     adapter = NetworkManagerAdapter(
         WifiConfig(), AccessPointConfig(), health, runner=HealthRunner(True)
@@ -486,7 +507,172 @@ def test_strict_health_policy_can_require_non_dns_internet_evidence(monkeypatch)
 
     assert not snapshot.uplink_ready
     assert snapshot.health_level == "local"
-    assert snapshot.error == "uplink_target_unreachable"
+    assert snapshot.error == "https_verification_failed"
+
+
+def test_verified_https_on_wifi_validates_when_global_nm_is_unknown(monkeypatch) -> None:
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: SocketConnection())
+    monkeypatch.setattr(
+        ConnectivityProbe, "verified_https_available", lambda self, interface: interface == "wlan0"
+    )
+    snapshot = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=HealthRunner(False)
+    ).snapshot()
+    assert snapshot.https_reachable
+    assert snapshot.uplink_ready
+    assert snapshot.health_level == "internet"
+
+
+class CaptivePortalRunner(HealthRunner):
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        if tuple(args)[:3] == ("nmcli", "networking", "connectivity"):
+            return CommandResult(0, "full\n")  # Ethernet/VPN may make global state full.
+        if tuple(args)[:3] == ("nmcli", "-g", "GENERAL.IP4-CONNECTIVITY"):
+            return CommandResult(0, "2 (portal)\n")
+        return super().run(args, timeout)
+
+
+class GlobalFullRunner(HealthRunner):
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        if tuple(args)[:3] == ("nmcli", "networking", "connectivity"):
+            return CommandResult(0, "full\n")
+        return super().run(args, timeout)
+
+
+def test_global_full_from_other_interface_does_not_validate_wifi(monkeypatch) -> None:
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: SocketConnection())
+    monkeypatch.setattr(
+        ConnectivityProbe, "verified_https_available", lambda self, interface: False
+    )
+    monkeypatch.setattr(
+        ConnectivityProbe, "captive_portal_detected", lambda self, interface: False
+    )
+    snapshot = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=GlobalFullRunner(True)
+    ).snapshot()
+    assert snapshot.connectivity_state == "full"
+    assert not snapshot.uplink_ready
+    assert snapshot.error == "https_verification_failed"
+
+
+def test_device_portal_overrides_global_full_and_tcp_dns(monkeypatch) -> None:
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: SocketConnection())
+    monkeypatch.setattr(
+        ConnectivityProbe, "verified_https_available", lambda self, interface: False
+    )
+    snapshot = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=CaptivePortalRunner(True)
+    ).snapshot()
+    assert snapshot.dns_reachable and snapshot.target_reachable
+    assert snapshot.captive_portal
+    assert not snapshot.uplink_ready
+    assert snapshot.error == "captive_portal"
+
+
+def test_http_login_redirect_is_portal_when_nm_checks_are_disabled(monkeypatch) -> None:
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: SocketConnection())
+    monkeypatch.setattr(
+        ConnectivityProbe, "verified_https_available", lambda self, interface: False
+    )
+    monkeypatch.setattr(
+        ConnectivityProbe, "captive_portal_detected", lambda self, interface: interface == "wlan0"
+    )
+    snapshot = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), runner=HealthRunner(True)
+    ).snapshot()
+    assert snapshot.captive_portal
+    assert snapshot.health_level == "portal"
+    assert snapshot.error == "captive_portal"
+    assert not snapshot.uplink_ready
+
+
+def test_http_portal_probe_recognizes_login_redirect_but_not_expected_204(monkeypatch) -> None:
+    import socket
+
+    bound: list[object] = []
+
+    class FakeSocket:
+        def __init__(self, response):
+            self.response = response
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def settimeout(self, timeout):
+            return None
+
+        def setsockopt(self, level, option, value):
+            bound.append(value)
+
+        def connect(self, endpoint):
+            bound.append(endpoint)
+
+        def sendall(self, request):
+            bound.append(request)
+
+        def recv(self, size):
+            return self.response
+
+    monkeypatch.setattr(socket, "SO_BINDTODEVICE", 25, raising=False)
+    probe = ConnectivityProbe(
+        HealthConfig(), ProbeRunner(CommandResult(0, "203.0.113.8 STREAM portal-probe\n"))
+    )
+    monkeypatch.setattr(socket, "socket", lambda *args: FakeSocket(b"HTTP/1.1 302 Found\r\n"))
+    assert probe.captive_portal_detected("wlan0")
+    assert b"wlan0\0" in bound
+    assert ("203.0.113.8", 80) in bound
+    monkeypatch.setattr(socket, "socket", lambda *args: FakeSocket(b"HTTP/1.1 204 No Content\r\n"))
+    assert not probe.captive_portal_detected("wlan0")
+
+
+def test_https_probe_binds_wifi_and_validates_tls(monkeypatch) -> None:
+    import socket
+    import ssl
+
+    calls: list[object] = []
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def settimeout(self, timeout):
+            calls.append(("timeout", timeout))
+
+        def setsockopt(self, level, option, value):
+            calls.append(("bind", level, option, value))
+
+        def connect(self, endpoint):
+            calls.append(("connect", endpoint))
+
+    class FakeTls(FakeSocket):
+        def sendall(self, request):
+            calls.append(("request", request))
+
+        def recv(self, size):
+            return b"HTTP/1.1"
+
+    class FakeContext:
+        def wrap_socket(self, transport, server_hostname):
+            calls.append(("tls", server_hostname))
+            return FakeTls()
+
+    monkeypatch.setattr(socket, "SO_BINDTODEVICE", 25, raising=False)
+    monkeypatch.setattr(socket, "socket", lambda *args: FakeSocket())
+    monkeypatch.setattr(ssl, "create_default_context", lambda: FakeContext())
+    probe = ConnectivityProbe(
+        HealthConfig(https_probe_hosts=("www.aliyun.com",)),
+        ProbeRunner(CommandResult(0, "203.0.113.8 STREAM www.aliyun.com\n")),
+    )
+    assert probe.verified_https_available("wlan0")
+    assert ("bind", socket.SOL_SOCKET, 25, b"wlan0\0") in calls
+    assert ("connect", ("203.0.113.8", 443)) in calls
+    assert ("tls", "www.aliyun.com") in calls
 
 
 class DuplicateHotspotRunner(RecordingRunner):

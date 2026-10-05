@@ -21,7 +21,7 @@ class ApiNetwork:
     def scan(self) -> list[WifiNetwork]:
         return [WifiNetwork("Test WiFi", 90, "WPA2", True)]
 
-    def reconnect_saved(self) -> bool:
+    def reconnect_saved(self, excluded_ssids: frozenset[str] = frozenset()) -> bool:
         return True
 
     def begin_checkpoint(self, timeout_seconds: int) -> str:

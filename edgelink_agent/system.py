@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import socket
+import ssl
 import stat
 import subprocess
 import tempfile
@@ -70,6 +72,92 @@ class ConnectivityProbe:
             if self._config.target_policy == "all" and not available:
                 return False
         return self._config.target_policy == "all"
+
+    def verified_https_available(self, interface: str) -> bool:
+        """Prove that this Wi-Fi device reaches a real HTTPS origin.
+
+        DNS and a TCP handshake can succeed inside a captive portal. Binding
+        before TLS also prevents a working Ethernet/VPN route from making a
+        captive Wi-Fi interface appear healthy.
+        """
+        bind_option = getattr(socket, "SO_BINDTODEVICE", None)
+        if bind_option is None:
+            return False
+        for host in self._config.https_probe_hosts:
+            for address in self._resolved_addresses(
+                host, self._config.https_probe_timeout_seconds
+            ):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as transport:
+                        transport.settimeout(self._config.https_probe_timeout_seconds)
+                        transport.setsockopt(
+                            socket.SOL_SOCKET, bind_option, interface.encode() + b"\0"
+                        )
+                        transport.connect((address, 443))
+                        with ssl.create_default_context().wrap_socket(
+                            transport, server_hostname=host
+                        ) as secure:
+                            request = (
+                                f"HEAD / HTTP/1.1\r\nHost: {host}\r\n"
+                                "Connection: close\r\n\r\n"
+                            )
+                            secure.sendall(request.encode())
+                            if secure.recv(8).startswith(b"HTTP/"):
+                                return True
+                except (OSError, ssl.SSLError):
+                    continue
+        return False
+
+    def captive_portal_detected(self, interface: str) -> bool:
+        """Detect a login-page redirect on the Wi-Fi link, never via Ethernet."""
+        bind_option = getattr(socket, "SO_BINDTODEVICE", None)
+        if bind_option is None:
+            return False
+        host = self._config.portal_probe_host
+        timeout = self._config.portal_probe_timeout_seconds
+        for address in self._resolved_addresses(host, timeout):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as transport:
+                    transport.settimeout(timeout)
+                    transport.setsockopt(
+                        socket.SOL_SOCKET, bind_option, interface.encode() + b"\0"
+                    )
+                    transport.connect((address, 80))
+                    request = (
+                        f"GET {self._config.portal_probe_path} HTTP/1.1\r\n"
+                        f"Host: {host}\r\nConnection: close\r\n\r\n"
+                    )
+                    transport.sendall(request.encode())
+                    response = b""
+                    while b"\r\n" not in response and len(response) < 128:
+                        chunk = transport.recv(128 - len(response))
+                        if not chunk:
+                            break
+                        response += chunk
+                    status_line = response.split(b"\r\n", 1)[0]
+                    match = re.match(rb"HTTP/1\.[01] (\d{3})\b", status_line)
+                    if match:
+                        return int(match.group(1)) in {200, 301, 302, 303, 307, 308, 401, 403, 511}
+            except OSError:
+                continue
+        return False
+
+    def _resolved_addresses(self, host: str, timeout: float) -> list[str]:
+        resolved = self._runner.run(("getent", "ahostsv4", host), timeout=timeout)
+        if resolved.returncode:
+            return []
+        addresses: list[str] = []
+        for line in resolved.stdout.splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            try:
+                address = str(ipaddress.IPv4Address(fields[0]))
+            except ipaddress.AddressValueError:
+                continue
+            if address not in addresses:
+                addresses.append(address)
+        return addresses[:2]
 
 
 class NetworkManagerAdapter:
@@ -205,18 +293,30 @@ class NetworkManagerAdapter:
         ])
         link_up = state.startswith("100") or "connected" in state.lower()
         connectivity = self._run("nmcli", "networking", "connectivity", "check", timeout=5.0)
-        connectivity_state = connectivity.stdout.strip().lower()
+        global_connectivity = connectivity.stdout.strip().lower()
+        device_connectivity = self._run(
+            "nmcli", "-g", "GENERAL.IP4-CONNECTIVITY", "device", "show",
+            self._wifi.interface, timeout=5.0,
+        )
+        device_state = _connectivity_state(device_connectivity.stdout)
+        connectivity_state = device_state if device_state != "unknown" else global_connectivity
         addressing_ready = bool(link_up and addresses and gateways)
         dns_ready = bool(dns) and self._probe.dns_available() if addressing_ready else False
-        # DNS and service probes are independent evidence. A restricted resolver or a
-        # single blocked public endpoint must not automatically invalidate the link.
+        # DNS and TCP targets remain diagnostics, not Internet admission evidence.
+        # A captive portal may allow both while intercepting application traffic.
         target_ready = self._probe.targets_available() if addressing_ready else False
-        captive_portal = connectivity_state == "portal"
-        internet_ready = (
-            connectivity_state == "full"
-            or target_ready
-            or (self._health.accept_dns_as_internet_evidence and dns_ready)
+        https_ready = (
+            self._probe.verified_https_available(self._wifi.interface)
+            if addressing_ready and connection_mode != "ap" and device_state != "portal"
+            and self._health.minimum_connectivity == "internet"
+            else False
         )
+        captive_portal = device_state == "portal" or (
+            device_state == "unknown" and global_connectivity == "portal" and not https_ready
+        )
+        if addressing_ready and not https_ready and not captive_portal and connection_mode != "ap":
+            captive_portal = self._probe.captive_portal_detected(self._wifi.interface)
+        internet_ready = https_ready and not captive_portal
         local_ready = addressing_ready and not captive_portal
         validation_passed = local_ready and (
             self._health.minimum_connectivity == "local" or internet_ready
@@ -239,6 +339,7 @@ class NetworkManagerAdapter:
             dns_servers=tuple(dns),
             dns_reachable=dns_ready,
             target_reachable=target_ready,
+            https_reachable=https_ready,
             connectivity_state=connectivity_state or "unknown",
             health_level=health_level,
             validation_passed=validation_passed,
@@ -253,6 +354,7 @@ class NetworkManagerAdapter:
                 validation_passed=validation_passed,
                 dns_ready=dns_ready,
                 target_ready=target_ready,
+                https_ready=https_ready,
             ),
         )
 
@@ -327,8 +429,8 @@ class NetworkManagerAdapter:
                 by_ssid[item.ssid] = item
         return sorted(by_ssid.values(), key=lambda item: (not item.active, -item.signal, item.ssid))
 
-    def reconnect_saved(self) -> bool:
-        candidates = self._saved_wifi_candidates()
+    def reconnect_saved(self, excluded_ssids: frozenset[str] = frozenset()) -> bool:
+        candidates = self._saved_wifi_candidates(excluded_ssids)
         if not candidates:
             return False
         # ``nmcli device connect`` may simply reactivate the current AP.  Select an
@@ -349,7 +451,9 @@ class NetworkManagerAdapter:
                 return True
         return False
 
-    def _saved_wifi_candidates(self) -> list[str]:
+    def _saved_wifi_candidates(
+        self, excluded_ssids: frozenset[str] = frozenset()
+    ) -> list[str]:
         visible = {
             network.ssid: network.signal
             for network in self.scan()
@@ -394,7 +498,7 @@ class NetworkManagerAdapter:
                 continue
             if interface_name not in {"", "--", self._wifi.interface}:
                 continue
-            if mode not in {"", "infrastructure"} or ssid not in visible:
+            if mode not in {"", "infrastructure"} or ssid not in visible or ssid in excluded_ssids:
                 continue
             try:
                 priority = int(priority_text)
@@ -683,6 +787,7 @@ def _health_error(
     validation_passed: bool,
     dns_ready: bool,
     target_ready: bool,
+    https_ready: bool,
 ) -> str:
     if not link_up:
         return "wifi_disconnected"
@@ -694,9 +799,20 @@ def _health_error(
         return "captive_portal"
     if validation_passed:
         return "" if dns_ready else "dns_degraded"
+    if not https_ready:
+        return "https_verification_failed"
     if not dns_ready and not target_ready:
         return "internet_evidence_unavailable"
     return "uplink_target_unreachable"
+
+
+def _connectivity_state(output: str) -> str:
+    value = output.strip().lower()
+    numeric = re.match(r"^([0-4])(?:\s|$)", value)
+    if numeric:
+        states = {"0": "unknown", "1": "none", "2": "portal", "3": "limited", "4": "full"}
+        return states[numeric.group(1)]
+    return value if value in {"unknown", "none", "portal", "limited", "full"} else "unknown"
 
 
 def _nm_unescape(value: str) -> str:
