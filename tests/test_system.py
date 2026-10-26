@@ -60,14 +60,18 @@ def test_easytier_peer_parser_ignores_header_and_local_node() -> None:
 
 
 class HotspotRunner:
+    AP_UUID = "11111111-1111-4111-8111-111111111111"
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
 
     def run(self, args, timeout: float = 10.0) -> CommandResult:
         call = tuple(args)
         self.calls.append(call)
-        if call[:5] == ("nmcli", "-g", "NAME", "connection", "show"):
-            return CommandResult(0, "Hotspot\n")
+        if call[:4] == ("nmcli", "-t", "-f", "UUID,TYPE,NAME"):
+            return CommandResult(0, f"{self.AP_UUID}:802-11-wireless:Hotspot\n")
+        if "connection.id,connection.interface-name,802-11-wireless.mode" in call:
+            return CommandResult(0, "Hotspot\nwlan0\nap\n")
         return CommandResult(0, "")
 
 
@@ -83,8 +87,8 @@ def test_existing_product_hotspot_is_reconciled_without_exposing_secret() -> Non
     assert adapter.start_ap("Zebao-1", "new-password")
 
     flattened = " ".join(part for call in runner.calls for part in call)
-    assert "connection up Hotspot" in flattened
-    assert "connection modify Hotspot" in flattened
+    assert f"connection up {runner.AP_UUID}" in flattened
+    assert f"connection modify {runner.AP_UUID}" in flattened
     assert "802-11-wireless.ssid Zebao-1" in flattened
     assert "passwd-file" in flattened
     assert "new-password" not in flattened
@@ -720,3 +724,91 @@ def test_snapshot_uses_active_uuid_when_duplicate_hotspot_names_exist() -> None:
     assert snapshot.ap_active
     mode_call = next(call for call in runner.calls if "802-11-wireless.mode" in call)
     assert mode_call[-1] == DuplicateHotspotRunner.ACTIVE_UUID
+
+
+class ProfileLifecycleRunner(RecordingRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.profiles = {
+            "broken-client": ("edgelink-provisioning", "wlan0", "infrastructure"),
+            "other-radio": ("edgelink-provisioning", "wlan1", "ap"),
+            "daemon": ("Hotspot", "wlan0", "ap"),
+        }
+        self.active_uuid = ""
+
+    def run(self, args, timeout: float = 10.0) -> CommandResult:
+        call = tuple(args)
+        self.calls.append(call)
+        if call[:4] == ("nmcli", "-t", "-f", "UUID,TYPE,NAME"):
+            return CommandResult(0, "".join(
+                f"{uid}:802-11-wireless:{values[0]}\n"
+                for uid, values in self.profiles.items()
+            ))
+        if "connection.id,connection.interface-name,802-11-wireless.mode" in call:
+            return CommandResult(0, "\n".join(self.profiles[call[-1]]) + "\n")
+        if call[:3] == ("nmcli", "connection", "add"):
+            uid = call[call.index("connection.uuid") + 1]
+            self.profiles[uid] = (
+                call[call.index("con-name") + 1],
+                call[call.index("ifname") + 1],
+                call[call.index("802-11-wireless.mode") + 1],
+            )
+        if call[:2] == ("nmcli", "-f"):
+            return CommandResult(0, f"GENERAL.CON-UUID: {self.active_uuid}\n")
+        return CommandResult(0, "")
+
+
+def test_repeated_ap_restore_creates_once_and_uses_exact_uuid() -> None:
+    runner = ProfileLifecycleRunner()
+    adapter = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(reserved_connection_names=("Hotspot",)),
+        HealthConfig(), runner=runner,
+    )
+    assert adapter.start_ap("Zebao-1", "test-password")
+    assert adapter.start_ap("Zebao-1", "test-password")
+    additions = [call for call in runner.calls if call[:3] == ("nmcli", "connection", "add")]
+    assert len(additions) == 1
+    created_uuid = additions[0][additions[0].index("connection.uuid") + 1]
+    assert additions[0][-2:] == ("connection.autoconnect", "no")
+    modifies = [call for call in runner.calls if call[:3] == ("nmcli", "connection", "modify")]
+    assert all(call[3] == created_uuid for call in modifies)
+    assert not any(call[3] in {"broken-client", "other-radio", "daemon"} for call in modifies)
+    assert "test-password" not in " ".join(part for call in runner.calls for part in call)
+    assert adapter.stop_ap()
+    assert runner.calls[-1] == ("nmcli", "connection", "down", "uuid", created_uuid)
+
+
+def test_repeated_wifi_provisioning_reuses_uuid_without_duplicate_profiles() -> None:
+    runner = ProfileLifecycleRunner()
+    adapter = NetworkManagerAdapter(WifiConfig(), AccessPointConfig(), HealthConfig(), runner)
+    assert adapter.connect("My WiFi", "test-password")
+    assert adapter.connect("My WiFi", "test-password")
+    additions = [call for call in runner.calls if call[:3] == ("nmcli", "connection", "add")]
+    assert len(additions) == 1
+    uid = additions[0][additions[0].index("connection.uuid") + 1]
+    assert runner.profiles[uid] == (_profile_name("My WiFi"), "wlan0", "infrastructure")
+
+
+def test_unreadable_profile_list_cannot_create_duplicates_or_claim_ap_stopped() -> None:
+    runner = ProbeRunner(CommandResult(10, "", "NetworkManager unavailable"))
+    adapter = NetworkManagerAdapter(WifiConfig(), AccessPointConfig(), HealthConfig(), runner)
+    assert not adapter.start_ap("Zebao-1", "test-password")
+    assert not adapter.connect("My WiFi", "test-password")
+    assert not adapter.stop_ap()
+    assert not any("add" in call or "modify" in call for call, _ in runner.calls)
+
+
+def test_infrastructure_profile_with_ap_name_is_not_an_active_hotspot(monkeypatch) -> None:
+    class WrongModeRunner(HealthRunner):
+        def run(self, args, timeout: float = 10.0) -> CommandResult:
+            result = super().run(args, timeout)
+            return CommandResult(
+                result.returncode, result.stdout.replace("Office", "edgelink-provisioning")
+            )
+
+    monkeypatch.setattr(ConnectivityProbe, "verified_https_available", lambda *args: True)
+    snapshot = NetworkManagerAdapter(
+        WifiConfig(), AccessPointConfig(), HealthConfig(), WrongModeRunner(False)
+    ).snapshot()
+    assert not snapshot.ap_active
+    assert snapshot.uplink_ready

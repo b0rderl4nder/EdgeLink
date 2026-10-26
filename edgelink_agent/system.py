@@ -10,6 +10,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -344,7 +345,7 @@ class NetworkManagerAdapter:
             health_level=health_level,
             validation_passed=validation_passed,
             captive_portal=captive_portal,
-            ap_active=connection_mode == "ap" or connection == self._ap.connection_name,
+            ap_active=connection_mode == "ap",
             checked_at=now,
             error=_health_error(
                 link_up=link_up,
@@ -510,15 +511,9 @@ class NetworkManagerAdapter:
 
     def connect(self, ssid: str, password: str) -> ConnectionAttempt:
         visible_before_switch = self._ssid_visibility(ssid)
-        profile = _profile_name(ssid)
-        exists = self._run("nmcli", "-g", "NAME", "connection", "show", profile).returncode == 0
-        if not exists:
-            created = self._run(
-                "nmcli", "connection", "add", "type", "wifi", "ifname", self._wifi.interface,
-                "con-name", profile, "ssid", ssid,
-            )
-            if created.returncode:
-                return ConnectionAttempt(False, "profile_prepare_failed")
+        profile = self._prepare_wifi_profile(_profile_name(ssid), ssid, "infrastructure")
+        if not profile:
+            return ConnectionAttempt(False, "profile_prepare_failed")
         base = self._run(
             "nmcli", "connection", "modify", profile,
             "connection.autoconnect", "no",
@@ -665,16 +660,68 @@ class NetworkManagerAdapter:
         )
         return result.returncode == 0
 
-    def start_ap(self, ssid: str, password: str) -> bool:
-        profile = self._ap.connection_name
-        exists = self._run("nmcli", "-g", "NAME", "connection", "show", profile).returncode == 0
-        if not exists:
-            created = self._run(
-                "nmcli", "connection", "add", "type", "wifi", "ifname", self._wifi.interface,
-                "con-name", profile, "ssid", ssid,
+    def _wifi_profile_uuid(self, name: str, mode: str) -> str | None:
+        """Resolve only the owned name, correct radio and mode to an exact UUID.
+
+        NAME is a connection-list column, not a setting accepted by
+        ``nmcli -g ... connection show <profile>``. The old existence check
+        therefore created another profile on every retry. Never repair that
+        ambiguity by modifying an arbitrary same-name profile.
+        """
+        profiles = self._run("nmcli", "-t", "-f", "UUID,TYPE,NAME", "connection", "show")
+        if profiles.returncode:
+            return None
+        candidates: list[str] = []
+        for line in profiles.stdout.splitlines():
+            fields = _nm_split(line)
+            if (
+                len(fields) != 3
+                or fields[1] not in {"wifi", "802-11-wireless"}
+                or fields[2] != name
+            ):
+                continue
+            profile_uuid = fields[0]
+            details = self._run(
+                "nmcli", "-g",
+                "connection.id,connection.interface-name,802-11-wireless.mode",
+                "connection", "show", "uuid", profile_uuid,
             )
-            if created.returncode:
-                return False
+            if details.returncode:
+                return None
+            values = details.stdout.splitlines()
+            if len(values) < 3:
+                return None
+            if (
+                _nm_unescape(values[0]) == name
+                and values[1] in {"", "--", self._wifi.interface}
+                and (values[2] or "infrastructure") == mode
+            ):
+                candidates.append(profile_uuid)
+        active_uuid = _first(self._device_fields().get("GENERAL.CON-UUID"))
+        if active_uuid in candidates:
+            return active_uuid
+        return min(candidates) if candidates else ""
+
+    def _prepare_wifi_profile(self, name: str, ssid: str, mode: str) -> str:
+        profile_uuid = self._wifi_profile_uuid(name, mode)
+        if profile_uuid is None:
+            return ""
+        if profile_uuid:
+            return profile_uuid
+        # A caller-supplied UUID makes subsequent mutations unambiguous even
+        # when NetworkManager retains a broken legacy profile with this name.
+        profile_uuid = str(uuid.uuid4())
+        created = self._run(
+            "nmcli", "connection", "add", "type", "wifi", "ifname", self._wifi.interface,
+            "con-name", name, "ssid", ssid, "connection.uuid", profile_uuid,
+            "802-11-wireless.mode", mode, "connection.autoconnect", "no",
+        )
+        return profile_uuid if created.returncode == 0 else ""
+
+    def start_ap(self, ssid: str, password: str) -> bool:
+        profile = self._prepare_wifi_profile(self._ap.connection_name, ssid, "ap")
+        if not profile:
+            return False
         modified = self._run(
             "nmcli", "connection", "modify", profile,
             "802-11-wireless.ssid", ssid,
@@ -697,7 +744,12 @@ class NetworkManagerAdapter:
         return activated.returncode == 0
 
     def stop_ap(self) -> bool:
-        result = self._run("nmcli", "connection", "down", self._ap.connection_name)
+        profile = self._wifi_profile_uuid(self._ap.connection_name, "ap")
+        if profile is None:
+            return False
+        if not profile:
+            return True
+        result = self._run("nmcli", "connection", "down", "uuid", profile)
         return result.returncode == 0 or "not active" in result.stderr.lower()
 
 
